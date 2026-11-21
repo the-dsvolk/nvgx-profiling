@@ -94,6 +94,12 @@ heavier workloads may show more.
    `NVRM: refcntRequestReference_IMPL: Failed to enter state 1 (status 0x56)` line with no permission error;
    it had no visible effect.
 10. Option B (native R620) isn't needed for the SDK on DGX Spark.
+11. **Viewing big traces:** Perfetto's `trace_processor` runs fine on the Spark (linux-arm64, v59.1). It
+    loads the 67 MB zip in 5.6 s (~1.2 GB RAM) vs. ~30 s in the browser's WASM engine. Serve it with
+    `server http --ip-address 127.0.0.1 --port 9001` and tunnel port 9001 over SSH. The default
+    ui.perfetto.dev build differed from the `trace_processor` build and showed "Version mismatch";
+    opening the matched build (`https://ui.perfetto.dev/v59.1-1e9c61e98/`) gave the
+    "YES, use loaded trace" dialog. `scripts/view-trace.sh` does all of this.
 
 ## Not done yet
 
