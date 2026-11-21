@@ -1,0 +1,93 @@
+# nvgx-profiling
+
+**NVidia GPU eXamination: profiling experiments.** The first experiment is the
+[NVIDIA Nsight Perf SDK for AI](https://github.com/NVIDIA/nsight-perf-sdk-for-ai) (Beta Preview),
+NVIDIA's always-on, low-overhead GPU/CUDA tracing SDK, running on **NVIDIA DGX Spark (GB10)**.
+
+> Personal experiments. Not affiliated with, endorsed by, or supported by NVIDIA.
+> NVIDIA, Nsight, DGX and CUDA are trademarks of NVIDIA Corporation.
+
+## Goal
+
+- Get the Nsight Perf SDK for AI service and tools running on a DGX Spark.
+- Trace real AI workloads (vLLM serving, PyTorch) and inspect the traces in [Perfetto](https://ui.perfetto.dev).
+- Measure overhead and write down what works, what doesn't, and why.
+
+## Hardware
+
+Two DGX Spark (GB10, aarch64, 128 GB unified memory) boxes:
+
+- **DGX Spark #2**: trial box. All installs happen here first.
+- **DGX Spark #1**: left untouched until the setup is proven on #2.
+
+## Requirements vs. DGX Spark (checked 2026-11-21)
+
+| SDK requirement | DGX Spark today | Status |
+|---|---|---|
+| GPU: Blackwell or Rubin | GB10, compute capability 12.1 (the SDK ships a metric config for it) | ✅ |
+| Linux, Ubuntu 24.04 / DGX OS on aarch64 | DGX OS 7.5 / 7.6 (Ubuntu 24.04), kernel 6.17 / 7.0 `-nvidia` | ✅ |
+| CMake 3.24+, C++17 compiler (source build) | CMake 3.28, GCC 13.3 | ✅ |
+| CUDA Toolkit 13.5+ | 13.0 installed; `cuda-toolkit-13-5` is in NVIDIA's apt repo | ⚠️ install side by side |
+| NVIDIA driver R620+ | R580 (580.17x) | ❌ no R620 for DGX Spark yet |
+| Fallback: kernel-mode driver ≥ 580.95.05 + CUDA 13.5 compat package | R580 ✅; `cuda-compat-13-5` (user-mode 620.70.06) is in apt | ✅ the route we use |
+| GPU performance-counter access | Admin only (`RmProfilingAdminOnly=1`) | ⚠️ run the service as root |
+
+## Findings so far
+
+**No native R620 driver for DGX Spark.** The R620 driver (620.70.06) lists GB10 as a supported GPU,
+but NVIDIA validates DGX Spark as a whole stack (DGX OS + NVIDIA's kernel + one driver branch), and
+that branch is still R580. NVIDIA says a newer DGX OS is "in the pipeline" with no date
+([forum thread](https://forums.developer.nvidia.com/t/r620-driver-and-cuda-13-5/388164)). In practice:
+
+- Ubuntu publishes prebuilt, signed driver modules for the DGX Spark kernels only up to R610/R615;
+  nothing exists for R620. R620 would mean building the modules locally with DKMS.
+- **Secure Boot is on**, so locally built modules won't load unless you enroll your own signing key
+  (MOK) at the console during a reboot, or turn Secure Boot off.
+- Newer driver branches have had GB10-specific regressions (reports include CUDA-graph hangs and
+  64k-page problems), so our boxes keep a local **apt pin that holds the driver on 580**. The pin
+  also blocks a native R620 install through apt.
+
+**So we use the CUDA forward-compatibility route.** `cuda-compat-13-5` only adds user-space
+libraries in a separate folder (`/usr/local/cuda-13.5/compat`). It doesn't touch the kernel module,
+Secure Boot, the pin or OS updates, and only programs pointed at it use it. An apt dry run installs
+it cleanly (one package, nothing removed). Caveats:
+
+- NVIDIA's [forward-compatibility doc](https://docs.nvidia.com/deploy/cuda-compatibility/latest/forward-compatibility.html)
+  lists Data Center GPUs, select RTX server SKUs and Jetson. DGX Spark isn't named, so this is
+  likely to work but unproven.
+- **Two drivers on one box:** traced workloads load the 13.5 compat driver
+  (`LD_LIBRARY_PATH=/usr/local/cuda-13.5/compat`), while the `nvidia-nsight-perf` service should
+  load the system `libcuda.so` that matches the kernel driver. Otherwise GPU GR-context tracing can
+  fail, and GPU timings for named kernels go missing.
+- The R620 user-mode driver brings two known NVTX issues: mixing core and payload push/pop calls,
+  and NVTX used on both sides of `fork()` (for PyTorch `DataLoader`, use `spawn` or `forkserver`).
+- No GPU power metrics: those need kernel driver R615+, and NVIDIA documents total power only for Rubin.
+- Only one tool can own a GPU's performance counters, so Nsight Systems / Nsight Compute can't
+  collect counters while the service is running.
+
+**Traces stay on the box.** Consumers attach through a local socket and shared memory. The data is
+written to local disk as a Trace Stream Database (`.nvtsf` blocks), as snapshots, or into
+DuckDB/Parquet (`nvtrace_continuous_export`). Getting data elsewhere means copying files or
+modifying the continuous-export hook.
+
+## Plan
+
+1. On DGX Spark #2: install `cuda-compat-13-5` and `cuda-toolkit-13-5`, then build the SDK or use
+   the aarch64 release tarball.
+2. Run `nvidia-nsight-perf` as root and run the bundled smoke test (`TestNvTraceCudaContinuousProfiling`).
+3. Trace a vLLM container (service in the host PID namespace, workload on the compat driver).
+   Check the service log for GR-context errors and confirm named kernels get GPU timings.
+4. Export to Perfetto and measure tracing overhead.
+5. Only if step 3 fails: consider a native R620 driver on #2 (remove the pin, DKMS, MOK enrollment).
+
+## Links
+
+- SDK: <https://github.com/NVIDIA/nsight-perf-sdk-for-ai>
+  (components: `nvtrace-client`, `nvtrace-tools`, `nvtrace-samples-cuda`, `nsight-perf-daemon`)
+- Service docs and Linux install guide: <https://github.com/NVIDIA/nsight-perf-daemon>
+- CUDA forward compatibility: <https://docs.nvidia.com/deploy/cuda-compatibility/latest/forward-compatibility.html>
+
+## License
+
+[Apache-2.0](LICENSE). The SDK itself and its proprietary binaries are under their own licenses;
+nothing from the SDK is redistributed here.
