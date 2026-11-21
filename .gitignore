@@ -1,0 +1,8 @@
+# Claude Code worktrees and local settings
+.claude/
+
+# SDK builds and trace output
+build/
+*.nvtsf
+*.perfetto-trace*
+*.duckdb
