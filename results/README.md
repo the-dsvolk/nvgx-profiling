@@ -2,7 +2,7 @@
 
 One Markdown file per run: `YYYY-MM-DD-<option>-<short-name>.md`.
 
-Record: box (DGX Spark #1/#2), option (A/B), kernel, driver (kernel-mode and user-mode), CUDA toolkit,
+Record: box (DGX Spark), option (A/B), kernel, driver (kernel-mode and user-mode), CUDA toolkit,
 SDK version, workload, what passed/failed against the [gates](../plan/README.md#gates), overhead numbers,
 and screenshots of interesting Perfetto views.
 

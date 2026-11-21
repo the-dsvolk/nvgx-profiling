@@ -13,17 +13,22 @@ to get the SDK running:
 | Main risk | GPU GR-context tracing needs the service on the host-matched `libcuda`; named-kernel GPU timings may be missing | GB10 regressions in a non-validated driver (CUDA graphs, unified memory); OS/kernel updates fight it |
 | Rollback | `apt remove`, minutes, no reboot | Reinstall the R580 packages + reboot, ~1 h, may need the console |
 
+## Status
+
+**Option A passed on 2026-11-21** ([results](../results/2026-11-21-option-a-dgx-spark.md)).
+Option B isn't needed and is kept for reference only.
+
 ## Decision
 
-1. **Start with Option A on DGX Spark #2.**
-2. Move to **Option B on DGX Spark #2 only if Option A fails its gate** (below) and the cause is the
-   compat route itself, not configuration.
-3. **DGX Spark #1 stays on stock R580** until DGX OS officially ships R620. If Option A passes on #2
-   and is useful, it can be repeated on #1 later (it's additive and reversible).
+1. **Start with Option A**, on a DGX Spark set aside for experiments.
+2. Move to **Option B only if Option A fails its gate** (below) and the cause is the compat route
+   itself, not configuration. Never on a DGX Spark that serves other workloads.
+3. **A DGX Spark that serves other workloads stays on stock R580** until DGX OS officially ships R620.
+   Option A can be repeated there later: it's additive and reversible.
 
 ## Gates
 
-**Option A passes when, on DGX Spark #2:**
+**Option A passes when, on the DGX Spark:**
 
 - the SDK smoke test (`TestNvTraceCudaContinuousProfiling`) passes;
 - the service log has no `GPU GR Context Trace provider failed to initialize the RM event buffer`;

@@ -1,11 +1,14 @@
-# Option B: native R620 driver (fallback, DGX Spark #2 only)
+# Option B: native R620 driver (fallback, experiments DGX Spark only)
+
+> **Not needed:** Option A passed on 2026-11-21
+> ([results](../results/2026-11-21-option-a-dgx-spark.md)). Kept for reference.
 
 Replace the R580 kernel driver with **R620.70.06** so the kernel driver and the CUDA 13.5 user-mode
 driver match. That meets the SDK's main requirement and removes Option A's split-driver issue with
 GPU GR-context tracing.
 
-**Only if Option A fails its gate** (see [the plan overview](README.md#gates)). Never on DGX Spark #1
-until DGX OS officially ships R620.
+**Only if Option A fails its gate** (see [the plan overview](README.md#gates)). Never on a DGX Spark
+that serves other workloads until DGX OS officially ships R620.
 
 ## Why it's risky
 
