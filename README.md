@@ -20,6 +20,10 @@ with no driver change, no installed packages and no reboot. The smoke test passe
 named GPU kernels with timings linked to their CUDA API calls, and overhead was within noise.
 Details and learnings: [`results/2026-11-21-option-a-dgx-spark.md`](results/2026-11-21-option-a-dgx-spark.md).
 
+## Showcases
+
+Annotated Perfetto views of real traces (GPU utilization, kernels, CUDA graphs, SQL): [`showcases/`](showcases/README.md).
+
 ## Setup
 
 **Hardware:** DGX Spark (GB10, aarch64, 128 GB unified memory) running stock DGX OS. A DGX Spark that
