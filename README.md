@@ -72,13 +72,15 @@ modifying the continuous-export hook.
 
 ## Plan
 
-1. On DGX Spark #2: install `cuda-compat-13-5` and `cuda-toolkit-13-5`, then build the SDK or use
-   the aarch64 release tarball.
-2. Run `nvidia-nsight-perf` as root and run the bundled smoke test (`TestNvTraceCudaContinuousProfiling`).
-3. Trace a vLLM container (service in the host PID namespace, workload on the compat driver).
-   Check the service log for GR-context errors and confirm named kernels get GPU timings.
-4. Export to Perfetto and measure tracing overhead.
-5. Only if step 3 fails: consider a native R620 driver on #2 (remove the pin, DKMS, MOK enrollment).
+Full plan, gates and rollback steps: [`plan/`](plan/README.md).
+
+- **[Option A: CUDA 13.5 compat route](plan/option-a-cuda-compat.md)** (first, on DGX Spark #2):
+  add `cuda-compat-13-5` + `cuda-toolkit-13-5`, run the service as root on the host-matched driver,
+  smoke test, trace vLLM, measure overhead. User-space only, no reboot.
+- **[Option B: native R620 driver](plan/option-b-native-r620.md)** (only if A fails, #2 only):
+  lift the 580 pin, install R620 with DKMS, enroll a Secure Boot key, run GB10 regression checks.
+
+Results go in [`results/`](results/).
 
 ## Links
 
