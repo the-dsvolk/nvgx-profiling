@@ -15,7 +15,7 @@ nvtrace_continuous_export (forked) --snapshot-ms 5000              ├ GET  /eve
 
 | Piece | Where | What it is |
 |---|---|---|
-| [`agent/NvgxFleetSink.h`](agent/NvgxFleetSink.h) | GPU node | `FleetSink`: a table sink with the same 7 methods as NVIDIA's DuckDB sink. Aggregates each snapshot's rows into a workload profile (kernel time by family, tiny-kernel share, CUDA-graph share, launch → GPU start delay, CPU sync wait, memcpy, GPU counters, verdict) and POSTs it from a background thread with a bounded queue. `TeeSink` feeds DuckDB and FleetSink together. |
+| [`agent/NvgxFleetSink.h`](agent/NvgxFleetSink.h) | GPU node | `FleetSink`: a table sink with the same 7 methods as NVIDIA's DuckDB sink. Aggregates each snapshot's rows into a workload profile (kernel time by family, tiny-kernel share, CUDA-graph share, launch → GPU start delay, CPU sync wait, memcpy, GPU counters, verdict; with [NVTX step ranges](nvtx/README.md), GPU time by prefill / decode / mixed step) and POSTs it from a background thread with a bounded queue. `TeeSink` feeds DuckDB and FleetSink together. |
 | [`agent/apply_fleet_patch.py`](agent/apply_fleet_patch.py) | GPU node | Applies 9 anchored edits to NVIDIA's `nvtrace_continuous_export.cpp` (SDK `beta-preview-update1`): include the header, add `--fleet-url` / `--fleet-node`, export through the TeeSink. |
 | [`fleet/nvgx_fleet.py`](fleet/nvgx_fleet.py) | Mac | Fleet service, Python standard library only: receive profiles, store in SQLite (`~/.nvgx-fleet/fleet.db`), push to browsers over server-sent events, serve the dashboard. |
 | [`fleet/static/`](fleet/static/) | Mac | Dashboard: stat tiles, GPU utilization, GPU time by kernel family, launch delay, lag, tables. Vanilla JS + SVG, light and dark mode. |
@@ -76,6 +76,52 @@ two independent paths, same answer.
   under load**. The newest dashboard data is at most ~7 s old, inside the 5–10 s target.
 - Without the root service the profiles carry CUDA API and memcpy data but no kernel timings or counters
   (the same permission limit as in the [results](../results/2026-11-21-option-a-dgx-spark.md)).
+
+## Prefill vs. decode (NVTX phases)
+
+With the vLLM container started as `NVTX=1 scripts/run-vllm.sh` (see [nvtx/README.md](nvtx/README.md)),
+every engine step is an NVTX range in domain `nvgx` whose message carries the step's prefill and decode
+token counts. FleetSink reads two more SDK tables and adds three fields to each profile:
+
+```json
+"attribution": { "...": "...",
+  "by_phase_ms": {"prefill": 0.0, "decode": 3890.5, "mixed": 1092.5, "unattributed": 0.0} },
+"phase_tokens": {"prefill": 10585, "decode": 7108},
+"phase_steps":  {"prefill": 0, "decode": 125, "mixed": 23}
+```
+
+- `attribution.by_phase_ms`: GPU kernel time (ms) in the window by step class: **prefill** (step has only
+  prefill tokens), **decode** (only decode tokens), **mixed** (both: chunked prefill riding on a decode
+  batch, the usual case under load), **unattributed** (not launched inside a step range, e.g. other
+  processes or startup). Sums to `attribution.kernel_time_ms`.
+- `phase_tokens`: prefill and decode tokens of the step ranges that ended in the window.
+- `phase_steps`: number of those steps per class.
+
+**Method: GPU kernel time per step class, not apportioned by tokens.**
+`nvtx_gpu_projection_segments` has one row per GPU operation and NVTX range open when it was launched.
+Immediate kernels map exactly through their kernel launch correlation ID. For CUDA graph kernels (nearly
+all GPU time here), continuous export gives graph launches no GPU timestamps, so a node execution can't be
+tied to one launch. The segments still give each node's graph executable and each launch's phase. So each
+exec's kernel time in the window is split across phases in proportion to its launches per phase. vLLM
+replays FULL graphs for decode-only batches and PIECEWISE graphs for batches with prefill, one exec per
+padded batch size, so an exec's launches are the same shape and nearly always the same phase.
+`phase_tokens` / `phase_steps` come from `nvtx_push_pop_ranges`. Retained history re-emits a range in up to
+~3 snapshots, so a range only counts if it ends after the latest end already counted on its thread.
+
+**Checked (2026-11-22):** over the same 25 s, the fleet profiles said decode 62.5% / mixed 37.5% /
+unattributed 0%, and the exact per-kernel projection in the Perfetto export said 61.5% / 38.2% / 0.4%
+outside step ranges. Steps and decode tokens per second matched vLLM's Prometheus counters (32.7 vs 30.5
+steps/s; 1,326 decode tok/s vs 1,280 generated tok/s; windows not aligned exactly). The exporter
+handled the extra tables in 0.25–1.3 s per snapshot once the box ran one traced vLLM.
+
+**Exporter crashes.** During this work the exporter died silently mid-export several times, always while
+short-lived traced CUDA processes were starting or exiting (side containers, test scripts). Under gdb the
+crash is a SIGSEGV in the SDK's `DataModelBuilderBase::ReconstructGpuKernelLaunches` (called from
+`ExportSnapshotToDatabase`), not in FleetSink. [`nvtx/exporter-supervisor.sh`](nvtx/exporter-supervisor.sh)
+runs the exporter under gdb (a crash leaves a backtrace in the log) and restarts it 3 s after it exits. It
+also passes `--data-rate 32`: NVTX projection rows plus heavier load overflowed the default 12 MiB/s history
+bank. Use a fresh `--output-dir` per long run: the DuckDB grows (6 GB after an hour with NVTX projection
+rows), and per-snapshot export time grows with it.
 
 ## Limits (POC)
 
