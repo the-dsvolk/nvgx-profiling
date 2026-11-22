@@ -148,7 +148,8 @@ with long prompts).
 - GPU busy % sums kernel durations (capped at 100%); overlapping kernels on several streams overcount.
 - Rows whose GPU times land in the next snapshot are completed from one snapshot of history; older ones are dropped.
 - Verdict thresholds are the design doc's initial heuristics, not calibrated.
-- The first snapshot after an exporter restart can cover more than 5 s of retained history, so its stacked
-  columns can exceed 5,000 ms. Normalising by the window's real length is a follow-up.
-- Kernel short names stop at a leading return-type template: a kernel declared as
-  `std::enable_if<…>::type name(…)` shows as `std::enable_if` and lands in "Other". Parsing past it is a follow-up.
+- Fixed 2026-11-22: snapshots longer than 5 s (the first after an exporter restart) are shown per 5 s, and kernel
+  short names skip leading return types (`std::enable_if<…>::type`) and keep `(anonymous namespace)`.
+- GPU time outside any NVTX step grows with load (up to ~24% under saturation); see the
+  [live dashboard showcase](../showcases/2026-11-22-live-fleet-dashboard/README.md#open-question-gpu-time-outside-any-step-grows-with-load).
+- Replay mode for rendering time-lapses: `?replay=<recording>&frame=N` ([`tools/timelapse/`](../tools/timelapse/README.md)).

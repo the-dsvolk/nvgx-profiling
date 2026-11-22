@@ -191,7 +191,9 @@ function stackedChart(container, legendEl, { series, field, height = 230 }) {
   if (!n) { container.replaceChildren(h("div", { class: "empty" }, null, "No data yet")); return; }
   const f = frame(container, height, { l: 48, r: 12, t: 10, b: 24 });
   const { svg, m, pw, ph } = f;
-  const data = profiles.map((p) => series.map(([k]) => get(p, `${field}.${k}`) || 0));
+  // A snapshot can cover more than 5 s (e.g. the first one after an exporter restart): show it per 5 s.
+  const norm = (p) => { const d = get(p, "window.duration_s"); return d && d > 5.5 ? 5 / d : 1; };
+  const data = profiles.map((p) => series.map(([k]) => (get(p, `${field}.${k}`) || 0) * norm(p)));
   const totals = data.map((r) => r.reduce((a, b) => a + b, 0));
   const top = niceMax(Math.max(...totals, 1) * 1.05);
   axes(f, top, n, null);
@@ -416,7 +418,36 @@ function add(p) {
   scheduleRender();
 }
 
+// ---------- replay / frame mode (for rendering time-lapse frames) ----------
+// ?replay=<recording.json>&frame=<N>[&window=<snapshots>] draws the window ending at snapshot N of a recording
+// (tools/timelapse/export_recording.py) instead of the live feed, with a caption of the active load regime.
+// Sets <html data-ready="1"> when drawn, for headless screenshots.
+async function startReplay(params) {
+  document.documentElement.classList.add("frame");
+  const rec = await (await fetch(params.get("replay"))).json();
+  const n = Math.max(0, Math.min(rec.profiles.length - 1, parseInt(params.get("frame") || "0", 10)));
+  const win = parseInt(params.get("window") || "120", 10);
+  allProfiles = rec.profiles.slice(Math.max(0, n - win + 1), n + 1).map(derive);
+  refreshNodes();
+  const p = rec.profiles[n];
+  const tEnd = p.window.end_utc_ns;
+  const regime = [...(rec.regimes || [])].reverse().find((r) => r.t_utc_ns <= tEnd);
+  const elapsed = Math.max(0, (tEnd - rec.t0_utc_ns) / 1e9);
+  const total = rec.duration_s || 1800;
+  const mmss = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const cap = document.getElementById("caption");
+  cap.replaceChildren();
+  h("b", {}, cap, regime ? `Load regime: ${regime.name}` : "Load regime: warm-up");
+  if (regime && regime.desc) h("span", {}, cap, regime.desc);
+  h("span", { class: "clock" }, cap, `${mmss(elapsed)} / ${mmss(total)}`);
+  setConn("live", "replay of a recorded run");
+  render();
+  document.documentElement.dataset.ready = "1";
+}
+
 async function start() {
+  const params = new URLSearchParams(location.search);
+  if (params.get("replay")) return startReplay(params);
   try {
     const r = await fetch(`/v1/profiles?limit=${MAX_POINTS * 4}`);
     allProfiles = (await r.json()).map(derive);

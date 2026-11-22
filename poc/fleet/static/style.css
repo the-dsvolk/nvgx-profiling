@@ -92,3 +92,18 @@ td { padding: 4px 6px; border-bottom: 1px solid var(--grid); color: var(--text-p
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 .empty { color: var(--text-muted); padding: 24px 0; text-align: center; }
+
+/* Replay / frame mode (time-lapse rendering): caption banner, hide tables and the lag chart. */
+.caption { display: none; }
+.frame .caption {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin: -6px 0 12px;
+  padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1);
+  font-size: 14px; color: var(--text-secondary);
+}
+.frame .caption b { color: var(--text-primary); font-weight: 600; }
+.frame .caption .clock { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.frame .filters, .frame .table-section, .frame #ch-lag, .frame .lag-card { display: none; }
+.frame .kpis { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px; }
+.frame .tile { padding: 10px 12px; }
+.frame .tile .value { font-size: 21px; }
+.frame .tile svg { max-width: 100%; }
