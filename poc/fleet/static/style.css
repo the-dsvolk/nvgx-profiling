@@ -30,7 +30,13 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; }
+html, body { margin: 0; background: #f9f9f7; }
+@media (prefers-color-scheme: dark) { html, body { background: #0d0d0d; } }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: -4px 0 14px; color: var(--text-secondary); font-size: 13px; }
+.filters select {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+}
 .viz-root {
   min-height: 100vh;
   background: var(--page);

@@ -702,8 +702,9 @@ namespace nvgx {
             j.Key("copies").Int(s.copies).Key("tiny_copies").Int(s.tinyCopies).Key("copy_time_pct").Num(copyPct, 1).End('}');
 
             j.Key("counters").Begin('{');
-            Counter(j, "tensor_active_pct", s.metrics, {"tensor"});
-            Counter(j, "sm_util_pct", s.metrics, {"sm", "inst"});
+            // Percent-of-peak metrics only (e.g. sm__inst_executed.sum is a raw count, not a utilization).
+            Counter(j, "tensor_active_pct", s.metrics, {"tensor", "pct"});
+            Counter(j, "sm_util_pct", s.metrics, {"sm__inst", "pct"});
             j.End('}');
 
             // Verdict heuristics (design/fleet-profiling.md section 7); raw numbers travel with the label.
@@ -712,12 +713,14 @@ namespace nvgx {
             {
                 std::string lower = name;
                 std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find("pct") == std::string::npos || vals.empty())
+                    continue; // only percent-of-peak metrics feed the verdict
                 double avg = 0;
                 for (double x : vals)
                     avg += x / vals.size();
                 if (lower.find("tensor") != std::string::npos)
                     tensor = avg;
-                else if (lower.find("sm") != std::string::npos && lower.find("inst") != std::string::npos)
+                else if (lower.find("sm__inst") != std::string::npos)
                     sm = avg;
             }
             const char* verdict = busy < 10 ? "idle"

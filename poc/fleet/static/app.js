@@ -17,7 +17,9 @@ const VERDICTS = {
 };
 const SVG = "http://www.w3.org/2000/svg";
 const seriesColor = (i) => `var(--series-${i + 1})`;
-let profiles = [];
+let allProfiles = []; // every node
+let profiles = [];    // the selected node's, used by all charts and tables
+let selectedNode = null;
 let renderQueued = false;
 
 // ---------- helpers ----------
@@ -46,10 +48,16 @@ const timeLabel = (p) => timeOf(p).toLocaleTimeString([], { hour: "2-digit", min
 function niceMax(v) {
   if (!(v > 0)) return 1;
   const p = Math.pow(10, Math.floor(Math.log10(v)));
-  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7.5, 10]) if (m * p >= v) return m * p;
   return 10 * p;
 }
-function ticks(max, n = 4) {
+function ticks(max) {
+  // Pick a tick count whose step is a round number (1, 2, 2.5 or 5 × 10^k).
+  const isNice = (step) => {
+    const m = step / Math.pow(10, Math.floor(Math.log10(step)));
+    return [1, 2, 2.5, 5, 10].some((x) => Math.abs(m - x) < 1e-9);
+  };
+  const n = [4, 5, 3, 6, 2].find((k) => isNice(max / k)) || 4;
   return Array.from({ length: n + 1 }, (_, i) => (max * i) / n);
 }
 function tickLabel(v) {
@@ -338,17 +346,45 @@ function setConn(state, text) {
   c.dataset.state = state;
   document.getElementById("connText").textContent = text;
 }
+function refreshNodes() {
+  const order = [];
+  for (let i = allProfiles.length - 1; i >= 0; i--) {
+    const n = allProfiles[i].node || "node";
+    if (!order.includes(n)) order.push(n);
+  }
+  if (!selectedNode || !order.includes(selectedNode)) selectedNode = order[0] || null;
+  const sel = document.getElementById("nodeSel");
+  const current = [...sel.options].map((o) => o.value).join("\n");
+  if (current !== order.join("\n")) {
+    sel.replaceChildren();
+    for (const n of order) {
+      const o = document.createElement("option");
+      o.value = n;
+      o.textContent = n;
+      sel.appendChild(o);
+    }
+  }
+  if (selectedNode) sel.value = selectedNode;
+  profiles = allProfiles.filter((p) => (p.node || "node") === selectedNode).slice(-MAX_POINTS);
+}
 function add(p) {
-  profiles.push(p);
-  if (profiles.length > MAX_POINTS) profiles.splice(0, profiles.length - MAX_POINTS);
+  allProfiles.push(p);
+  if (allProfiles.length > MAX_POINTS * 4) allProfiles.splice(0, allProfiles.length - MAX_POINTS * 4);
+  refreshNodes();
   scheduleRender();
 }
 
 async function start() {
   try {
-    const r = await fetch(`/v1/profiles?limit=${MAX_POINTS}`);
-    profiles = await r.json();
-  } catch (e) { profiles = []; }
+    const r = await fetch(`/v1/profiles?limit=${MAX_POINTS * 4}`);
+    allProfiles = await r.json();
+  } catch (e) { allProfiles = []; }
+  refreshNodes();
+  document.getElementById("nodeSel").addEventListener("change", (ev) => {
+    selectedNode = ev.target.value;
+    refreshNodes();
+    scheduleRender();
+  });
   scheduleRender();
   const es = new EventSource("/events");
   es.onopen = () => setConn("live", "live");

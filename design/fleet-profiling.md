@@ -211,9 +211,11 @@ The fleet dashboard updates in near real time; its lag is set mainly by the snap
 | **5 s (POC setting)** | **~5 s + export** | NVIDIA's exporter warns that intervals below 5 s risk losing data under heavy load, so 5 s is the practical floor for this route |
 | < 1 s | needs a direct consumer of the SDK's provider buffers (option C in §5.1), e.g. a counters-only fast lane | Not needed so far |
 
-**Measured in the POC** ([`poc/`](../poc/README.md), 2026-11-22): each 5 s snapshot is exported to DuckDB and
-FleetSink in 100–270 ms, and the profile reaches the fleet service **0.06–0.31 s after the window ends**.
-So the newest dashboard data is at most ~5.3 s old.
+**Measured in the POC** ([`poc/`](../poc/README.md), 2026-11-22, vLLM under a varying load loop): each 5 s
+snapshot is exported to DuckDB and FleetSink in 100–600 ms, and the profile reaches the fleet service
+**0.06–0.3 s (idle) to 0.9–1.8 s (under load) after the window ends**. So the newest dashboard data is at
+most ~7 s old, inside the 5–10 s target. The live per-family split matched the offline Perfetto analysis of
+the same benchmark (GEMM 50% / FlashAttention 43% vs. 50.9% / 42.6%).
 
 **How it stays live:** the fleet service pushes each new profile to open dashboards over server-sent
 events, so charts update without polling or reloading. Grafana on top of the stored profiles (or OTLP

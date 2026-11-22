@@ -51,10 +51,29 @@ ssh -N -R 9100:127.0.0.1:9100 <gpu-node>               # lets the node reach it
 open http://127.0.0.1:9100                             # dashboard
 ```
 
-## Measured (2026-11-22)
+## Live run (2026-11-22)
 
-- Exporter: each 5 s snapshot exported to DuckDB **and** FleetSink in 100–270 ms (budget: 5 s).
-- Lag from the end of a snapshot window to the profile arriving on the Mac: **0.06–0.31 s**.
+![Live fleet dashboard](img/dashboard-live.png)
+
+vLLM (Qwen3-0.6B) on the DGX Spark under a repeating load loop, streamed to the Mac dashboard:
+
+| Load phase | GPU time by kernel family | Tensor Active | Launch → start p50 / p95 | Verdict |
+|---|---|---|---|---|
+| A: concurrency 16, 512 in / 256 out | GEMM 50%, FlashAttention 43% | ~9% | ~19 / ~45 ms | Launch / sync-bound |
+| B: concurrency 4 | mostly GEMM | ~4% | ~10 / ~13 ms | Launch / sync-bound |
+| C: concurrency 32, 2048 in / 64 out (prefill-heavy) | FlashAttention 74% | ~22% | ~120 / ~183 ms | Mixed |
+
+In every phase GPU busy (kernel time) is ~99% while SM utilization stays at 3–6%.
+
+**Cross-check:** phase A's split (GEMM 50%, FlashAttention 43%) matches the offline Perfetto SQL on the
+earlier capture of the same benchmark (50.9% / 42.6%, [showcase](../showcases/2026-11-21-vllm-qwen3-0.6b/README.md)):
+two independent paths, same answer.
+
+**Timing:**
+
+- Each 5 s snapshot is exported to DuckDB **and** FleetSink in 100–600 ms (budget: 5 s).
+- Lag from the end of a snapshot window to the profile arriving on the Mac: **0.06–0.3 s idle, 0.9–1.8 s
+  under load**. The newest dashboard data is at most ~7 s old, inside the 5–10 s target.
 - Without the root service the profiles carry CUDA API and memcpy data but no kernel timings or counters
   (the same permission limit as in the [results](../results/2026-11-21-option-a-dgx-spark.md)).
 

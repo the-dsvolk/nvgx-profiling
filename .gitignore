@@ -6,3 +6,6 @@ build/
 *.nvtsf
 *.perfetto-trace*
 *.duckdb
+
+# Python bytecode
+__pycache__/
