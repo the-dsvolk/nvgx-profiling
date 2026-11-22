@@ -14,6 +14,7 @@
     <span class="conn" id="conn" data-state="waiting"><span class="dot"></span><span id="connText">connecting</span></span>
     <span class="sub" id="updated"></span>
   </header>
+  <div class="caption" id="caption" role="status"></div>
 
   <div class="filters">
     <label>Node <select id="nodeSel" aria-label="Node"></select></label>
@@ -52,7 +53,7 @@
     </div>
   </section>
 
-  <section class="grid2">
+  <section class="grid2 lag-card">
     <div class="card">
       <h2>Dashboard lag</h2>
       <p class="desc">End of the snapshot window → profile received here. Target: within 5–10 s.</p>
@@ -60,7 +61,7 @@
     </div>
   </section>
 
-  <section class="grid2">
+  <section class="grid2 table-section">
     <div class="card">
       <h2>Latest snapshot: kernel families</h2>
       <p class="desc">Table view of the stacked chart's newest column.</p>
@@ -73,7 +74,7 @@
     </div>
   </section>
 
-  <section class="card">
+  <section class="card table-section">
     <h2>Recent snapshots</h2>
     <p class="desc">Table view of the charts above (newest first).</p>
     <div id="tb-recent"></div>

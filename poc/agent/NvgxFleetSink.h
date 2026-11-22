@@ -114,10 +114,38 @@ namespace nvgx {
         return Other;
     }
     // "void flash::flash_fwd_splitkv_kernel<...>(...)" -> "flash::flash_fwd_splitkv_kernel"
-    inline std::string ShortName(std::string_view n)
+    inline std::string ShortName(std::string_view raw)
     {
-        if (n.rfind("void ", 0) == 0)
-            n.remove_prefix(5);
+        // "(anonymous namespace)" is part of a qualified name, not a parameter list.
+        std::string tmp(raw);
+        for (size_t p; (p = tmp.find("(anonymous namespace)")) != std::string::npos;)
+            tmp.replace(p, 21, "{anon}");
+        std::string_view n(tmp);
+        // Skip a leading return type ("void ", "std::enable_if<...>::type "): the function name starts after the
+        // last top-level space before the top-level parameter list.
+        {
+            int d = 0, pd = 0; // angle-bracket and parenthesis depth (a '>' inside parentheses is an operator)
+            size_t start = 0;
+            for (size_t i = 0; i < n.size(); ++i)
+            {
+                const char c = n[i];
+                if (c == '(')
+                {
+                    if (d == 0 && pd == 0)
+                        break; // the parameter list
+                    ++pd;
+                }
+                else if (c == ')')
+                    pd = std::max(0, pd - 1);
+                else if (pd == 0 && c == '<')
+                    ++d;
+                else if (pd == 0 && c == '>')
+                    d = std::max(0, d - 1);
+                else if (c == ' ' && d == 0 && pd == 0)
+                    start = i + 1;
+            }
+            n.remove_prefix(std::min(start, n.size()));
+        }
         std::string out;
         int depth = 0;
         for (char c : n)
