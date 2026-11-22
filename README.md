@@ -24,6 +24,11 @@ Details and learnings: [`results/2026-11-21-option-a-dgx-spark.md`](results/2026
 
 Annotated Perfetto views of real traces (GPU utilization, kernels, CUDA graphs, SQL): [`showcases/`](showcases/README.md).
 
+## Design
+
+Proposal for fleet-wide continuous GPU profiling built on the SDK, going beyond DCGM-style device metrics:
+[`design/fleet-profiling.md`](design/fleet-profiling.md).
+
 ## Setup
 
 **Hardware:** DGX Spark (GB10, aarch64, 128 GB unified memory) running stock DGX OS. A DGX Spark that

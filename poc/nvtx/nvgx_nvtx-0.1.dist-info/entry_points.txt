@@ -1,0 +1,2 @@
+[vllm.general_plugins]
+nvgx_nvtx = nvgx_nvtx:register
