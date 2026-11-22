@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: nvgx-nvtx
+Version: 0.1
+Summary: NVTX step ranges (prefill/decode token counts) for vLLM, loaded as a vLLM general plugin

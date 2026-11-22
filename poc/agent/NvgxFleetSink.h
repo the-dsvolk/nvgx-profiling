@@ -4,6 +4,7 @@
 //
 // It implements the same 7-method sink interface as nv::trace::DuckDbTableSink, and TeeSink feeds both.
 // Column positions follow NvTraceTableSchema.h of the Nsight Perf SDK for AI beta-preview-update1.
+// Prefill/decode attribution reads the NVTX step ranges written by poc/nvtx (domain "nvgx").
 // See design/fleet-profiling.md in https://github.com/the-dsvolk/nvgx-profiling.
 #pragma once
 
@@ -15,6 +16,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -31,6 +33,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -135,6 +138,43 @@ namespace nvgx {
         if (out.empty())
             out = std::string(n.substr(0, 80));
         return out.substr(0, 80);
+    }
+
+    // ---------- prefill / decode phases from NVTX step ranges (poc/nvtx, domain "nvgx") ----------
+    // Message: "step prefill_tokens=<P> decode_tokens=<D> reqs=..."; class: prefill (D == 0), decode (P == 0), mixed.
+    enum Phase : int { PhasePrefill, PhaseDecode, PhaseMixed, PhaseUnattributed, PhaseCount };
+    inline const char* PhaseName(int p)
+    {
+        static const char* names[] = {"prefill", "decode", "mixed", "unattributed"};
+        return names[p];
+    }
+    constexpr std::string_view kStepDomain = "nvgx";
+    inline bool ParseUint(std::string_view s, std::string_view key, uint64_t& out)
+    {
+        size_t at = s.find(key);
+        if (at == std::string_view::npos)
+            return false;
+        at += key.size();
+        uint64_t v = 0;
+        size_t digits = 0;
+        for (; at < s.size() && s[at] >= '0' && s[at] <= '9'; ++at, ++digits)
+            v = v * 10 + static_cast<uint64_t>(s[at] - '0');
+        out = v;
+        return digits > 0;
+    }
+    // Returns the phase of a step range, or -1 if this is not an nvgx step range.
+    inline int StepPhase(std::string_view domain, std::string_view msg, uint64_t* prefillTokens = nullptr, uint64_t* decodeTokens = nullptr)
+    {
+        if (domain != kStepDomain || msg.rfind("step ", 0) != 0)
+            return -1;
+        uint64_t p = 0, d = 0;
+        if (!ParseUint(msg, "prefill_tokens=", p) || !ParseUint(msg, "decode_tokens=", d))
+            return -1;
+        if (prefillTokens)
+            *prefillTokens = p;
+        if (decodeTokens)
+            *decodeTokens = d;
+        return (p && d) ? PhaseMixed : (p ? PhasePrefill : PhaseDecode);
     }
 
     // ---------- minimal JSON writer ----------
@@ -418,16 +458,17 @@ namespace nvgx {
             {
                 const uint64_t proc = U64(v, n, 2).value_or(0);
                 const auto* fn = LookupFunction(proc, U64(v, n, 11).value_or(0));
+                const uint64_t launchCorr = U64(v, n, 5).value_or(0);
                 auto s = U64(v, n, 24), e = U64(v, n, 25);
                 auto apiStart = LookupApiStart(proc, U64(v, n, 8));
                 if (s && e)
                 {
-                    AddKernel(fn, *s, *e, false, proc);
+                    AddKernel(fn, *s, *e, false, proc, launchCorr);
                     if (apiStart && *s > *apiStart)
                         m_snap.delaysMs.push_back((*s - *apiStart) / 1e6);
                 }
                 else
-                    m_kernelPendingNew[{proc, U64(v, n, 6).value_or(0)}] = {fn ? fn->family : int(Unresolved), fn ? fn->shortName : std::string("??"), apiStart.value_or(0), 0};
+                    m_kernelPendingNew[{proc, U64(v, n, 6).value_or(0)}] = {fn ? fn->family : int(Unresolved), fn ? fn->shortName : std::string("??"), apiStart.value_or(0), 0, launchCorr};
                 break;
             }
             case TableIndex_CudaGraphNodeLaunches:
@@ -436,7 +477,7 @@ namespace nvgx {
                 const auto* fn = LookupFunction(proc, U64(v, n, 7).value_or(0));
                 auto s = U64(v, n, 19), e = U64(v, n, 20);
                 if (s && e)
-                    AddKernel(fn, *s, *e, true, proc);
+                    AddKernel(fn, *s, *e, true, proc, U64(v, n, 5).value_or(0));
                 else if (s)
                     m_nodePendingNew[{proc, U64(v, n, 5).value_or(0)}] = {fn ? fn->family : int(Unresolved), fn ? fn->shortName : std::string("??"), 0, *s};
                 break;
@@ -464,6 +505,46 @@ namespace nvgx {
                     m_snap.d2d += bytes;
                 break;
             }
+            case TableIndex_NvtxPushPopRanges:
+            {
+                // Count each completed step range once. Retained history re-emits a range in up to ~3 snapshots;
+                // steps on one thread end in order, so count only ranges ending after the thread's watermark
+                // (the latest end counted in earlier snapshots).
+                uint64_t p = 0, d = 0;
+                const int phase = StepPhase(Str(v, n, 8), Str(v, n, 11), &p, &d);
+                const auto end = U64(v, n, 6);
+                if (phase < 0 || !end)
+                    break;
+                const Key thread{U64(v, n, 2).value_or(0), U64(v, n, 3).value_or(0)};
+                if (auto it = m_rangeWatermark.find(thread); it != m_rangeWatermark.end() && *end <= it->second)
+                    break;
+                uint64_t& next = m_rangeWatermarkNext[thread];
+                next = std::max(next, *end);
+                m_snap.phaseTokens[0] += p;
+                m_snap.phaseTokens[1] += d;
+                m_snap.phaseSteps[phase]++;
+                break;
+            }
+            case TableIndex_NvtxGpuProjectionSegments:
+            {
+                // One row per GPU operation and NVTX range on its stack: map the operation to its step's phase.
+                const int phase = StepPhase(Str(v, n, 10), Str(v, n, 11));
+                if (phase < 0)
+                    break;
+                const uint64_t proc = U64(v, n, 2).value_or(0);
+                const std::string_view source = Str(v, n, 12);
+                if (source == "immediate_kernel_launch")
+                    m_kernelPhaseNew[{proc, U64(v, n, 15).value_or(0)}] = static_cast<int8_t>(phase);
+                else if (source == "graph_node_launch")
+                {
+                    // Node -> graph executable, and one count per graph launch (API correlation ID) and phase.
+                    const uint64_t exec = U64(v, n, 17).value_or(0);
+                    m_nodeExec[{proc, U64(v, n, 20).value_or(0)}] = exec;
+                    if (m_snap.launchesSeen.insert({proc, U64(v, n, 16).value_or(0)}).second)
+                        m_snap.execLaunches[{proc, exec}][phase]++;
+                }
+                break;
+            }
             case TableIndex_GpuPartitions:
                 m_chip = std::string(Str(v, n, 2));
                 m_device = std::string(Str(v, n, 3));
@@ -489,7 +570,7 @@ namespace nvgx {
                 auto s = U64(v, n, 5), e = U64(v, n, 6);
                 if (const Pending* p = FindPending(m_kernelPendingNew, m_kernelPendingPrev, k); p && s && e)
                 {
-                    AddKernelFamily(p->family, p->shortName, *s, *e, false, k.first);
+                    AddKernelFamily(p->family, p->shortName, *s, *e, false, k.first, p->launchCorr);
                     if (p->apiStart && *s > p->apiStart)
                         m_snap.delaysMs.push_back((*s - p->apiStart) / 1e6);
                 }
@@ -499,7 +580,7 @@ namespace nvgx {
                 Key k{U64(v, n, 2).value_or(0), U64(v, n, 4).value_or(0)};
                 auto e = U64(v, n, 6);
                 if (const Pending* p = FindPending(m_nodePendingNew, m_nodePendingPrev, k); p && e)
-                    AddKernelFamily(p->family, p->shortName, p->gpuStart, *e, true, k.first);
+                    AddKernelFamily(p->family, p->shortName, p->gpuStart, *e, true, k.first, k.second);
             }
             else if (update == TableUpdateIndex_CudaGraphLaunchTimestamp)
             {
@@ -520,8 +601,17 @@ namespace nvgx {
         {
             if (!m_enabled)
                 return true;
+            ResolvePhases();
             const auto ingestMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_snap.ingestStart).count();
             m_sender.Put(BuildProfile(ingestMs));
+            m_kernelPhasePrev = std::move(m_kernelPhaseNew);
+            for (const auto& [thread, end] : m_rangeWatermarkNext)
+                m_rangeWatermark[thread] = std::max(m_rangeWatermark[thread], end);
+            m_rangeWatermarkNext.clear();
+            m_execLaunchesPrev = std::move(m_snap.execLaunches);
+            m_kernelPhaseNew.clear();
+            if (m_nodeExec.size() > 4'000'000)
+                m_nodeExec.clear(); // bounded; graph nodes are re-learned from the next segments
             // Rows still missing their GPU times may complete in the next snapshot; keep one generation.
             m_kernelPendingPrev = std::move(m_kernelPendingNew);
             m_nodePendingPrev = std::move(m_nodePendingNew);
@@ -555,7 +645,14 @@ namespace nvgx {
             std::string shortName;
             uint64_t apiStart = 0;
             uint64_t gpuStart = 0;
+            uint64_t launchCorr = 0; // immediate kernels: kernel_launch_correlation_id
         };
+        struct KernelRec
+        {
+            uint64_t proc, id, durNs; // id: kernel launch correlation ID, or graph node correlation ID
+            bool graph;
+        };
+        using PhaseCounts = std::array<uint64_t, 3>;
         struct KernelStat
         {
             uint64_t count = 0, timeNs = 0;
@@ -573,6 +670,12 @@ namespace nvgx {
             std::vector<double> delaysMs;
             uint64_t copyNs = 0, copies = 0, tinyCopies = 0, h2d = 0, d2h = 0, d2d = 0;
             std::map<std::string, std::vector<double>> metrics;
+            std::vector<KernelRec> kernelRecs;
+            std::unordered_set<Key, PairHash> launchesSeen;                    // (proc, graph launch API corr)
+            std::unordered_map<Key, PhaseCounts, PairHash> execLaunches;       // (proc, graph exec) -> launches by phase
+            uint64_t phaseNs[PhaseCount] = {};
+            uint64_t phaseTokens[2] = {};
+            uint64_t phaseSteps[3] = {};
         };
         using PendingMap = std::unordered_map<Key, Pending, PairHash>;
 
@@ -592,6 +695,15 @@ namespace nvgx {
                 return it->second;
             return std::nullopt;
         }
+        template <typename M>
+        static const typename M::mapped_type* FindIn(const M& a, const M& b, const Key& k)
+        {
+            if (auto it = a.find(k); it != a.end())
+                return &it->second;
+            if (auto it = b.find(k); it != b.end())
+                return &it->second;
+            return nullptr;
+        }
         static const Pending* FindPending(const PendingMap& a, const PendingMap& b, const Key& k)
         {
             if (auto it = b.find(k); it != b.end())
@@ -600,15 +712,17 @@ namespace nvgx {
                 return &it->second;
             return nullptr;
         }
-        void AddKernel(const FuncInfo* fn, uint64_t s, uint64_t e, bool graph, uint64_t proc)
+        // launchCorr: kernel_launch_correlation_id for immediate kernels, graph_node_correlation_id for graph nodes.
+        void AddKernel(const FuncInfo* fn, uint64_t s, uint64_t e, bool graph, uint64_t proc, uint64_t launchCorr)
         {
-            AddKernelFamily(fn ? fn->family : int(Unresolved), fn ? fn->shortName : std::string("??"), s, e, graph, proc);
+            AddKernelFamily(fn ? fn->family : int(Unresolved), fn ? fn->shortName : std::string("??"), s, e, graph, proc, launchCorr);
         }
-        void AddKernelFamily(int family, const std::string& name, uint64_t s, uint64_t e, bool graph, uint64_t proc)
+        void AddKernelFamily(int family, const std::string& name, uint64_t s, uint64_t e, bool graph, uint64_t proc, uint64_t launchCorr)
         {
             if (e <= s)
                 return;
             const uint64_t d = e - s;
+            m_snap.kernelRecs.push_back({proc, launchCorr, d, graph});
             m_snap.kernels++;
             m_snap.kernelNs += d;
             m_snap.familyNs[family] += d;
@@ -620,6 +734,53 @@ namespace nvgx {
             st.count++;
             st.timeNs += d;
             m_snap.processes.insert(proc);
+        }
+
+        // GPU kernel time per step phase, from the SDK's NVTX -> GPU projection (nvtx_gpu_projection_segments: one row
+        // per GPU operation and NVTX range open when it was launched).
+        // * Immediate kernels: exact, through their kernel launch correlation ID.
+        // * CUDA graph kernels: in continuous export, graph launches carry no GPU timestamps, so a node's execution
+        //   can't be tied to one launch. The segments do give each node's graph executable and each launch's phase,
+        //   so a graph exec's kernel time in this snapshot is split across phases in proportion to its launches per
+        //   phase. vLLM replays FULL graphs for decode-only batches and PIECEWISE graphs for batches with prefill,
+        //   one exec per padded batch size, so an exec's launches are the same shape and almost always one phase.
+        // * Everything else (no step range, or an exec with no step launches) is unattributed.
+        void ResolvePhases()
+        {
+            Snapshot& s = m_snap;
+            std::unordered_map<Key, uint64_t, PairHash> execNs;
+            for (const KernelRec& k : s.kernelRecs)
+            {
+                if (!k.graph)
+                {
+                    const int8_t* ph = FindIn(m_kernelPhaseNew, m_kernelPhasePrev, {k.proc, k.id});
+                    s.phaseNs[ph ? int(*ph) : int(PhaseUnattributed)] += k.durNs;
+                    continue;
+                }
+                auto it = m_nodeExec.find({k.proc, k.id});
+                if (it == m_nodeExec.end())
+                    s.phaseNs[PhaseUnattributed] += k.durNs;
+                else
+                    execNs[{k.proc, it->second}] += k.durNs;
+            }
+            for (const auto& [exec, ns] : execNs)
+            {
+                const PhaseCounts* c = FindIn(s.execLaunches, m_execLaunchesPrev, exec);
+                const uint64_t total = c ? (*c)[0] + (*c)[1] + (*c)[2] : 0;
+                if (!total)
+                {
+                    s.phaseNs[PhaseUnattributed] += ns;
+                    continue;
+                }
+                uint64_t assigned = 0;
+                for (int p = 0; p < 2; ++p)
+                {
+                    const uint64_t part = static_cast<uint64_t>(static_cast<double>(ns) * (*c)[p] / total);
+                    s.phaseNs[p] += part;
+                    assigned += part;
+                }
+                s.phaseNs[PhaseMixed] += ns - assigned;
+            }
         }
 
         static void Counter(Json& j, const char* key, std::map<std::string, std::vector<double>>& metrics, const std::vector<std::string>& needles)
@@ -673,7 +834,18 @@ namespace nvgx {
             j.Key("by_kernel_family_ms").Begin('{');
             for (int f = 0; f < FamilyCount; ++f)
                 j.Key(FamilyName(f)).Num(s.familyNs[f] / 1e6, 1);
+            j.End('}');
+            // GPU kernel time per engine-step class from the nvgx NVTX step ranges (see ResolvePhases).
+            j.Key("by_phase_ms").Begin('{');
+            for (int p = 0; p < PhaseCount; ++p)
+                j.Key(PhaseName(p)).Num(s.phaseNs[p] / 1e6, 1);
             j.End('}').End('}');
+            // Tokens and steps of the step ranges that ended in this window.
+            j.Key("phase_tokens").Begin('{').Key("prefill").Int(s.phaseTokens[0]).Key("decode").Int(s.phaseTokens[1]).End('}');
+            j.Key("phase_steps").Begin('{');
+            for (int p = 0; p < 3; ++p)
+                j.Key(PhaseName(p)).Int(s.phaseSteps[p]);
+            j.End('}');
 
             std::vector<std::pair<std::string, KernelStat>> top(s.byName.begin(), s.byName.end());
             std::sort(top.begin(), top.end(), [](auto& a, auto& b) { return a.second.timeNs > b.second.timeNs; });
@@ -747,6 +919,11 @@ namespace nvgx {
         std::unordered_map<Key, uint64_t, PairHash> m_apiStartNew, m_apiStartPrev;
         PendingMap m_kernelPendingNew, m_kernelPendingPrev, m_nodePendingNew, m_nodePendingPrev;
         std::unordered_map<Key, uint64_t, PairHash> m_graphPendingNew, m_graphPendingPrev;
+        // Phase attribution state; New = this snapshot, Prev = one generation back (late GPU times).
+        std::unordered_map<Key, int8_t, PairHash> m_kernelPhaseNew, m_kernelPhasePrev; // (proc, kernel launch corr)
+        std::unordered_map<Key, uint64_t, PairHash> m_nodeExec;                        // (proc, graph node corr) -> exec
+        std::unordered_map<Key, PhaseCounts, PairHash> m_execLaunchesPrev;             // previous snapshot's counts
+        std::unordered_map<Key, uint64_t, PairHash> m_rangeWatermark, m_rangeWatermarkNext; // (proc, thread) -> last end counted
     };
 
     // Feeds every row to two sinks (e.g. DuckDB for local storage + FleetSink for the fleet).
