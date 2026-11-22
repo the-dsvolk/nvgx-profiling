@@ -65,6 +65,14 @@ vLLM (Qwen3-0.6B) on the DGX Spark under a repeating load loop, streamed to the 
 
 In every phase GPU busy (kernel time) is ~99% while SM utilization stays at 3–6%.
 
+**Variable workload.** That fixed three-phase `vllm bench serve` loop is now replaced by
+[`workload/nvgx_load.py`](workload/README.md), a standard-library load generator that keeps changing
+the traffic: multi-turn chat sessions whose number (0–64), prompt length (tens to ~3,000 tokens),
+output length (16 to ~2,000 tokens) and arrival pattern (steady, bursts, idle gaps) move through
+named regimes (trickle, chat, rag, decode, burst, steady-high). Prefill-heavy, decode-heavy, light,
+saturated and idle periods all show up on the dashboard. It logs per-request TTFT, latency and time
+per output token to JSONL, prints the current regime, and keeps going through server restarts.
+
 **Cross-check:** phase A's split (GEMM 50%, FlashAttention 43%) matches the offline Perfetto SQL on the
 earlier capture of the same benchmark (50.9% / 42.6%, [showcase](../showcases/2026-11-21-vllm-qwen3-0.6b/README.md)):
 two independent paths, same answer.
