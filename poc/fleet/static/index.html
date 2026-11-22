@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nvgx fleet: live GPU workload profiles</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="viz-root">
+  <header>
+    <h1>nvgx fleet</h1>
+    <span class="sub" id="ident">waiting for the first profile</span>
+    <span class="conn" id="conn" data-state="waiting"><span class="dot"></span><span id="connText">connecting</span></span>
+    <span class="sub" id="updated"></span>
+  </header>
+
+  <section class="kpis" id="kpis" aria-label="Latest snapshot"></section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>GPU utilization</h2>
+      <p class="desc">Per 5 s snapshot: share of time a kernel was running vs. SM and tensor-core utilization (hardware counters).</p>
+      <div class="legend" id="lg-util"></div>
+      <div class="chart" id="ch-util"></div>
+    </div>
+    <div class="card">
+      <h2>GPU time by kernel family</h2>
+      <p class="desc">Milliseconds of kernel time per 5 s snapshot.</p>
+      <div class="legend" id="lg-fam"></div>
+      <div class="chart" id="ch-fam"></div>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Launch → GPU start delay</h2>
+      <p class="desc">Time from the CPU launch call (or CUDA graph launch) to the kernel starting on the GPU.</p>
+      <div class="legend" id="lg-delay"></div>
+      <div class="chart" id="ch-delay"></div>
+    </div>
+    <div class="card">
+      <h2>Dashboard lag</h2>
+      <p class="desc">End of the snapshot window → profile received here. Target: within 5–10 s.</p>
+      <div class="chart" id="ch-lag"></div>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Latest snapshot: kernel families</h2>
+      <p class="desc">Table view of the stacked chart's newest column.</p>
+      <div id="tb-fam"></div>
+    </div>
+    <div class="card">
+      <h2>Latest snapshot: top kernels</h2>
+      <p class="desc">By GPU time.</p>
+      <div id="tb-top"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Recent snapshots</h2>
+    <p class="desc">Table view of the charts above (newest first).</p>
+    <div id="tb-recent"></div>
+  </section>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

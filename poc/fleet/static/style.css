@@ -1,0 +1,88 @@
+/* nvgx-fleet dashboard. Palette roles from the validated reference palette (light + dark). */
+.viz-root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface-1: #fcfcfb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6;
+  --status-good: #0ca30c; --status-warning: #fab219; --status-critical: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #0ca30c; --series-7: #9085e9;
+  }
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+.viz-root {
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--text-primary);
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: 20px 24px 40px;
+}
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin-bottom: 16px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; }
+.sub { color: var(--text-secondary); }
+.conn { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+.conn[data-state="live"] .dot { background: var(--status-good); }
+.conn[data-state="waiting"] .dot { background: var(--status-warning); }
+.conn[data-state="down"] .dot { background: var(--status-critical); }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile, .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; }
+.tile { padding: 12px 14px; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+.tile .note { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+.tile svg { display: block; margin-top: 6px; }
+
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.card { padding: 12px 14px 8px; position: relative; }
+.card h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.card .desc { color: var(--text-secondary); font-size: 12px; margin: 2px 0 6px; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .dlabel { fill: var(--text-secondary); font-size: 11px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 6px; color: var(--text-secondary); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.legend i.line { width: 14px; height: 2px; border-radius: 1px; }
+
+.tooltip {
+  position: absolute; pointer-events: none; z-index: 5; min-width: 150px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); padding: 8px 10px; font-size: 12px; display: none;
+}
+.tooltip .t { color: var(--text-muted); margin-bottom: 4px; }
+.tooltip .row { display: flex; align-items: center; gap: 8px; }
+.tooltip .row i { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.tooltip .row b { font-weight: 600; color: var(--text-primary); }
+.tooltip .row span { color: var(--text-secondary); }
+
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; color: var(--text-secondary); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--grid); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--grid); color: var(--text-primary); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.empty { color: var(--text-muted); padding: 24px 0; text-align: center; }

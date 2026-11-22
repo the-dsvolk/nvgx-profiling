@@ -194,8 +194,42 @@ before they're trusted; the profile always carries the raw numbers behind the la
 - **Snapshots:** `POST /v1/snapshots` with metadata and the object-storage URL.
 - **Node control (optional):** `POST /v1/nodes/{id}/capture` to request a snapshot on demand.
 - **Every batch carries** the SDK schema version and the profile schema version.
+- **Push model:** nodes push when a snapshot is ready; the fleet only receives. Nodes behind NAT or
+  firewalls only need outbound connections.
+- **Production path: a message bus.** Agents publish profiles to a durable topic (Kafka, Google Pub/Sub,
+  NATS JetStream or similar) keyed by node and GPU; independent consumers subscribe: storage writer, live
+  dashboard, regression jobs, alerting. That gives buffering when the fleet is slow or down, fan-out and
+  replay. Triggered snapshots go to object storage with only a pointer on the bus. The POC posts directly.
 
-## 11. Volumes
+## 11. Dashboard and latency
+
+The fleet dashboard updates in near real time; its lag is set mainly by the snapshot interval.
+
+| Snapshot interval | Dashboard lag | Notes |
+|---|---|---|
+| 30 s (exporter default) | ~30 s + export | Lightest load |
+| **5 s (POC setting)** | **~5 s + export** | NVIDIA's exporter warns that intervals below 5 s risk losing data under heavy load, so 5 s is the practical floor for this route |
+| < 1 s | needs a direct consumer of the SDK's provider buffers (option C in §5.1), e.g. a counters-only fast lane | Not needed so far |
+
+**Measured in the POC** ([`poc/`](../poc/README.md), 2026-11-22): each 5 s snapshot is exported to DuckDB and
+FleetSink in 100–270 ms, and the profile reaches the fleet service **0.06–0.31 s after the window ends**.
+So the newest dashboard data is at most ~5.3 s old.
+
+**How it stays live:** the fleet service pushes each new profile to open dashboards over server-sent
+events, so charts update without polling or reloading. Grafana on top of the stored profiles (or OTLP
+metrics) with a 5 s refresh is the off-the-shelf alternative.
+
+**What the dashboard shows** (beyond device-level metrics):
+
+- stat tiles: bottleneck verdict, GPU busy (kernel time), SM and Tensor utilization, launch → start p95,
+  dashboard lag;
+- GPU utilization over time: kernel-time "busy" next to SM and tensor-core utilization;
+- GPU time by kernel family per snapshot (stacked);
+- launch → GPU start delay p50/p95;
+- end-to-end lag against the 10 s target;
+- table views: latest kernel families, top kernels, recent snapshots.
+
+## 12. Volumes
 
 | Data | Size | Source |
 |---|---|---|
@@ -204,23 +238,24 @@ before they're trusted; the profile always carries the raw numbers behind the la
 | Fingerprints | hundreds of keys × a few numbers per snapshot | estimate |
 | Triggered snapshot | tens to hundreds of MB (67 MB zip for 70 s in our run) | measured / scaled |
 
-## 12. Risks and open questions
+## 13. Risks and open questions
 
 - **Beta SDK:** the table schema and tool code may change between releases; pin versions and send schema versions.
-- **Build:** the fork needs the SDK built from source (CMake; possibly the CUDA 13.5 toolkit).
+- **Build:** the fork needs the SDK built from source (CMake). On DGX Spark the existing CUDA 13.0 toolkit
+  was enough (verified in the POC).
 - **Snapshot time budget:** profile computation must fit well inside the snapshot interval.
 - **Permissions:** the service needs root or `CAP_PERFMON`; on DGX Spark today, the CUDA compat route as well.
 - **Hardware scope:** Blackwell and Rubin only; mixed fleets need a DCGM-only fallback.
 - **NVTX coverage:** phase attribution depends on workloads emitting NVTX (vLLM doesn't by default).
 - **Security:** node identity, auth tokens, TLS; kernel names and process info can be sensitive.
 
-## 13. Milestones
+## 14. Milestones
 
-| | Milestone | Proves |
-|---|---|---|
-| M0 | **Offline prototype:** compute the workload profile in Python from an existing capture (DuckDB from `nvtrace_continuous_export`, or the Perfetto trace via `trace_processor`) | The signals and verdict are computable and useful, no C++ yet |
-| M1 | `FleetSink` + `TeeSink` in a fork of `nvtrace_continuous_export`, on DGX Spark | Live per-snapshot profiles within the time budget |
-| M2 | Minimal fleet receiver (e.g. FastAPI + DuckDB) and one view: GPU time by phase and kernel family over time, with the verdict | End to end |
-| M3 | Triggers and snapshot upload | Root cause in Perfetto from a fleet alert |
-| M4 | DCGM join | Health + workload in one place |
-| M5 | NVTX-instrumented workloads (vLLM options, PyTorch training) and a larger model | Phase attribution, verdicts on heavier loads |
+| | Milestone | Proves | Status |
+|---|---|---|---|
+| M0 | **Offline prototype:** compute the workload profile in Python from an existing capture (DuckDB from `nvtrace_continuous_export`, or the Perfetto trace via `trace_processor`) | The signals and verdict are computable and useful, no C++ yet | Skipped: went straight to M1 |
+| M1 | `FleetSink` + `TeeSink` in a fork of `nvtrace_continuous_export`, on DGX Spark | Live per-snapshot profiles within the time budget | **POC working** ([`poc/`](../poc/README.md)) |
+| M2 | Minimal fleet receiver and one view: GPU time by phase and kernel family over time, with the verdict | End to end | **POC working**: Python stdlib + SQLite + SSE dashboard on a Mac |
+| M3 | Triggers and snapshot upload | Root cause in Perfetto from a fleet alert | – |
+| M4 | DCGM join | Health + workload in one place | – |
+| M5 | NVTX-instrumented workloads (vLLM options, PyTorch training) and a larger model | Phase attribution, verdicts on heavier loads | – |
