@@ -18,7 +18,7 @@ nvtrace_continuous_export (forked) --snapshot-ms 5000              ├ GET  /eve
 | [`agent/NvgxFleetSink.h`](agent/NvgxFleetSink.h) | GPU node | `FleetSink`: a table sink with the same 7 methods as NVIDIA's DuckDB sink. Aggregates each snapshot's rows into a workload profile (kernel time by family, tiny-kernel share, CUDA-graph share, launch → GPU start delay, CPU sync wait, memcpy, GPU counters, verdict; with [NVTX step ranges](nvtx/README.md), GPU time by prefill / decode / mixed step) and POSTs it from a background thread with a bounded queue. `TeeSink` feeds DuckDB and FleetSink together. |
 | [`agent/apply_fleet_patch.py`](agent/apply_fleet_patch.py) | GPU node | Applies 9 anchored edits to NVIDIA's `nvtrace_continuous_export.cpp` (SDK `beta-preview-update1`): include the header, add `--fleet-url` / `--fleet-node`, export through the TeeSink. |
 | [`fleet/nvgx_fleet.py`](fleet/nvgx_fleet.py) | Mac | Fleet service, Python standard library only: receive profiles, store in SQLite (`~/.nvgx-fleet/fleet.db`), push to browsers over server-sent events, serve the dashboard. |
-| [`fleet/static/`](fleet/static/) | Mac | Dashboard: stat tiles, GPU utilization, GPU time by kernel family, launch delay, lag, tables. Vanilla JS + SVG, light and dark mode. |
+| [`fleet/static/`](fleet/static/) | Mac | Dashboard: node filter, stat tiles (verdict, GPU busy, SM/Tensor, launch delay, decode share, prefill/decode tokens/s, lag), GPU utilization, GPU time by kernel family, GPU time by step phase (NVTX), launch delay, lag, tables. Vanilla JS + SVG, light and dark mode; keeps updating in background tabs. |
 
 The POC posts straight to the fleet service. In production a message bus (Kafka, Pub/Sub, NATS) sits in
 between; see the design doc.
@@ -129,7 +129,18 @@ crash is a SIGSEGV in the SDK's `DataModelBuilderBase::ReconstructGpuKernelLaunc
 runs the exporter under gdb (a crash leaves a backtrace in the log) and restarts it 3 s after it exits. It
 also passes `--data-rate 32`: NVTX projection rows plus heavier load overflowed the default 12 MiB/s history
 bank. Use a fresh `--output-dir` per long run: the DuckDB grows (6 GB after an hour with NVTX projection
-rows), and per-snapshot export time grows with it.
+rows), and per-snapshot export time grows with it. Before NVTX it had already crept from 0.1–0.6 s to
+2.8–3.8 s per snapshot after ~730 snapshots (one hour), close to the 5 s budget. For always-on fleet use the
+local DuckDB copy should be optional or rotated (FleetSink alone needs no database).
+
+### Dashboard with phases and the variable workload
+
+![Live dashboard with prefill/decode phases](img/dashboard-phases.png)
+
+The variable workload ([`workload/`](workload/README.md)) cycles through regimes: trickle, chat, rag, decode,
+burst, steady-high and idle gaps. They show up as changing verdicts (host-bound in light regimes,
+launch/sync-bound under load) and phase splits (decode share ~99% in decode-heavy regimes, mixed steps rising
+with long prompts).
 
 ## Limits (POC)
 
@@ -137,3 +148,7 @@ rows), and per-snapshot export time grows with it.
 - GPU busy % sums kernel durations (capped at 100%); overlapping kernels on several streams overcount.
 - Rows whose GPU times land in the next snapshot are completed from one snapshot of history; older ones are dropped.
 - Verdict thresholds are the design doc's initial heuristics, not calibrated.
+- The first snapshot after an exporter restart can cover more than 5 s of retained history, so its stacked
+  columns can exceed 5,000 ms. Normalising by the window's real length is a follow-up.
+- Kernel short names stop at a leading return-type template: a kernel declared as
+  `std::enable_if<…>::type name(…)` shows as `std::enable_if` and lands in "Other". Parsing past it is a follow-up.

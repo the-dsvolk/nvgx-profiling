@@ -227,6 +227,8 @@ metrics) with a 5 s refresh is the off-the-shelf alternative.
   dashboard lag;
 - GPU utilization over time: kernel-time "busy" next to SM and tensor-core utilization;
 - GPU time by kernel family per snapshot (stacked);
+- GPU time by step phase (prefill-only / decode-only / mixed), from NVTX ranges on each vLLM engine step
+  ([`poc/nvtx/`](../poc/nvtx/README.md)); live profiles matched an exact Perfetto attribution within ~1 point;
 - launch → GPU start delay p50/p95;
 - end-to-end lag against the 10 s target;
 - table views: latest kernel families, top kernels, recent snapshots.
@@ -245,7 +247,12 @@ metrics) with a 5 s refresh is the off-the-shelf alternative.
 - **Beta SDK:** the table schema and tool code may change between releases; pin versions and send schema versions.
 - **Build:** the fork needs the SDK built from source (CMake). On DGX Spark the existing CUDA 13.0 toolkit
   was enough (verified in the POC).
-- **Snapshot time budget:** profile computation must fit well inside the snapshot interval.
+- **Snapshot time budget:** profile computation must fit well inside the snapshot interval. In the POC the
+  exporter's own local DuckDB was the threat: per-snapshot export grew from 0.1–0.6 s to 2.8–3.8 s after an
+  hour as the file grew (6 GB/hour with NVTX rows). For fleet use the local copy should be optional or rotated.
+- **SDK exporter crashes (beta):** `nvtrace_continuous_export` crashed several times inside the SDK
+  (`DataModelBuilderBase::ReconstructGpuKernelLaunches`) when short-lived traced processes started or exited.
+  The agent needs a supervisor (restart + backtrace), and this is worth reporting upstream.
 - **Permissions:** the service needs root or `CAP_PERFMON`; on DGX Spark today, the CUDA compat route as well.
 - **Hardware scope:** Blackwell and Rubin only; mixed fleets need a DCGM-only fallback.
 - **NVTX coverage:** phase attribution depends on workloads emitting NVTX (vLLM doesn't by default).

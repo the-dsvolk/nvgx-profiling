@@ -17,6 +17,13 @@ const VERDICTS = {
 };
 const SVG = "http://www.w3.org/2000/svg";
 const seriesColor = (i) => `var(--series-${i + 1})`;
+// Step phases from the NVTX hook (poc/nvtx); "unattributed" stays neutral gray.
+const PHASES = [
+  ["decode", "Decode-only steps", seriesColor(0)],
+  ["mixed", "Mixed steps (prefill + decode)", seriesColor(1)],
+  ["prefill", "Prefill-only steps", seriesColor(2)],
+  ["unattributed", "Outside any step", "var(--text-muted)"],
+];
 let allProfiles = []; // every node
 let profiles = [];    // the selected node's, used by all charts and tables
 let selectedNode = null;
@@ -176,14 +183,15 @@ function lineChart(container, legendEl, { series, height = 210, yMax, fmt, ref }
   hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); tt.style.display = "none"; });
 }
 
-function stackedChart(container, legendEl, { height = 230 }) {
+function stackedChart(container, legendEl, { series, field, height = 230 }) {
+  // series: [[key, label, color]]; field: profile path of the {key: ms} object.
   const card = container.closest(".card");
   const n = profiles.length;
-  legend(legendEl, FAMILIES.map(([, label], i) => ({ label, color: seriesColor(i) })), "rect");
+  legend(legendEl, series.map(([, label, color]) => ({ label, color })), "rect");
   if (!n) { container.replaceChildren(h("div", { class: "empty" }, null, "No data yet")); return; }
   const f = frame(container, height, { l: 48, r: 12, t: 10, b: 24 });
   const { svg, m, pw, ph } = f;
-  const data = profiles.map((p) => FAMILIES.map(([k]) => get(p, `attribution.by_kernel_family_ms.${k}`) || 0));
+  const data = profiles.map((p) => series.map(([k]) => get(p, `${field}.${k}`) || 0));
   const totals = data.map((r) => r.reduce((a, b) => a + b, 0));
   const top = niceMax(Math.max(...totals, 1) * 1.05);
   axes(f, top, n, null);
@@ -204,9 +212,9 @@ function stackedChart(container, legendEl, { height = 230 }) {
       const yTop = base - ys(v) + (isTop ? 0 : gap);
       if (isTop && hgt > 4 && colW >= 8) {
         const r = 4;
-        s("path", { d: `M${x},${base}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + colW - r}Q${x + colW},${yTop} ${x + colW},${yTop + r}V${base}Z` }, g, { fill: seriesColor(k) });
+        s("path", { d: `M${x},${base}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + colW - r}Q${x + colW},${yTop} ${x + colW},${yTop + r}V${base}Z` }, g, { fill: series[k][2] });
       } else {
-        s("rect", { x, y: yTop, width: colW, height: hgt }, g, { fill: seriesColor(k) });
+        s("rect", { x, y: yTop, width: colW, height: hgt }, g, { fill: series[k][2] });
       }
       base -= ys(v);
     });
@@ -222,7 +230,7 @@ function stackedChart(container, legendEl, { height = 230 }) {
     const i = n <= 1 ? 0 : Math.max(0, Math.min(n - 1, Math.round(((sx - m.l) / pw) * (n - 1))));
     if (last >= 0 && cols[last]) cols[last].style.opacity = "";
     cols[i].style.opacity = "0.75"; last = i;
-    const rows = FAMILIES.map(([, label], k) => ({ color: seriesColor(k), label, v: data[i][k] }))
+    const rows = series.map(([, label, color], k) => ({ color, label, v: data[i][k] }))
       .filter((rw) => rw.v > 0).map((rw) => ({ color: rw.color, label: `${rw.label} · ${totals[i] ? Math.round((100 * rw.v) / totals[i]) : 0}%`, value: fmtMs(rw.v) }));
     fillTooltip(tt, `${timeLabel(profiles[i])} · ${fmtMs(totals[i])} total`, rows.length ? rows : [{ color: "transparent", label: "no kernels", value: "0 ms" }]);
     const cr = card.getBoundingClientRect();
@@ -267,6 +275,12 @@ function renderKpis() {
   tile("SM utilization", fmtPct(get(p, "counters.sm_util_pct.avg")), `p99 ${fmtPct(get(p, "counters.sm_util_pct.p99"))}`, "counters.sm_util_pct.avg");
   tile("Tensor Active", fmtPct(get(p, "counters.tensor_active_pct.avg")), `p99 ${fmtPct(get(p, "counters.tensor_active_pct.p99"))}`, "counters.tensor_active_pct.avg");
   tile("Launch → start p95", fmtMs(get(p, "launch_path.launch_to_start_ms_p95")), `p50 ${fmtMs(get(p, "launch_path.launch_to_start_ms_p50"))}`, "launch_path.launch_to_start_ms_p95");
+  if (get(p, "attribution.by_phase_ms")) {
+    tile("Decode share of GPU time", fmtPct(get(p, "derived.decode_pct")),
+      `mixed ${fmtPct(get(p, "derived.mixed_pct"))} · prefill-only ${fmtPct(get(p, "derived.prefill_pct"))}`, "derived.decode_pct");
+    tile("Tokens per second", `${fmtNum(get(p, "derived.prefill_tps"), 0)} / ${fmtNum(get(p, "derived.decode_tps"), 0)}`,
+      "prefill / decode (from NVTX step ranges)", "derived.decode_tps");
+  }
   tile("Dashboard lag", fmtS(get(p, "fleet.lag_s")), "target 5–10 s", "fleet.lag_s");
 }
 
@@ -299,10 +313,10 @@ function renderTables() {
   table(document.getElementById("tb-top"), [["Kernel"], ["Launches", 1], ["GPU time", 1]],
     (p ? get(p, "kernels.top") || [] : []).map((k) => [k.name, (k.launches || 0).toLocaleString(), fmtMs(k.time_ms)]));
   table(document.getElementById("tb-recent"),
-    [["Snapshot end"], ["Verdict"], ["GPU busy", 1], ["SM util", 1], ["Tensor", 1], ["Launches/s", 1], ["Delay p95", 1], ["Lag", 1]],
+    [["Snapshot end"], ["Verdict"], ["GPU busy", 1], ["SM util", 1], ["Tensor", 1], ["Decode %", 1], ["Launches/s", 1], ["Delay p95", 1], ["Lag", 1]],
     profiles.slice(-12).reverse().map((q) => [timeLabel(q), (VERDICTS[q.verdict] || [q.verdict])[0],
       fmtPct(get(q, "attribution.gpu_busy_pct")), fmtPct(get(q, "counters.sm_util_pct.avg")), fmtPct(get(q, "counters.tensor_active_pct.avg")),
-      fmtNum(get(q, "kernels.launches_per_s"), 0), fmtMs(get(q, "launch_path.launch_to_start_ms_p95")), fmtS(get(q, "fleet.lag_s"))]));
+      fmtPct(get(q, "derived.decode_pct")), fmtNum(get(q, "kernels.launches_per_s"), 0), fmtMs(get(q, "launch_path.launch_to_start_ms_p95")), fmtS(get(q, "fleet.lag_s"))]));
 }
 
 function render() {
@@ -323,7 +337,14 @@ function render() {
       { label: "SM utilization", color: seriesColor(2), get: (q) => get(q, "counters.sm_util_pct.avg") },
     ],
   });
-  stackedChart(document.getElementById("ch-fam"), document.getElementById("lg-fam"), {});
+  stackedChart(document.getElementById("ch-fam"), document.getElementById("lg-fam"), {
+    field: "attribution.by_kernel_family_ms",
+    series: FAMILIES.map(([k, label], i) => [k, label, seriesColor(i)]),
+  });
+  stackedChart(document.getElementById("ch-phase"), document.getElementById("lg-phase"), {
+    field: "attribution.by_phase_ms",
+    series: PHASES,
+  });
   lineChart(document.getElementById("ch-delay"), document.getElementById("lg-delay"), {
     fmt: { value: fmtMs, axis: null },
     series: [
@@ -338,7 +359,13 @@ function render() {
   });
   renderTables();
 }
-function scheduleRender() { if (!renderQueued) { renderQueued = true; requestAnimationFrame(render); } }
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  // requestAnimationFrame pauses in background tabs; keep monitoring views current there too.
+  if (document.hidden) setTimeout(render, 100); else requestAnimationFrame(render);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) scheduleRender(); });
 
 // ---------- data ----------
 function setConn(state, text) {
@@ -346,6 +373,21 @@ function setConn(state, text) {
   c.dataset.state = state;
   document.getElementById("connText").textContent = text;
 }
+// Derived per-profile values used by tiles, sparklines and tables.
+function derive(p) {
+  const ph = get(p, "attribution.by_phase_ms");
+  const tok = p.phase_tokens;
+  const secs = get(p, "window.duration_s") || 5;
+  const d = {};
+  if (ph) {
+    const tot = PHASES.reduce((a, [k]) => a + (ph[k] || 0), 0);
+    for (const [k] of PHASES) d[`${k}_pct`] = tot ? (100 * (ph[k] || 0)) / tot : null;
+  }
+  if (tok) { d.prefill_tps = (tok.prefill || 0) / secs; d.decode_tps = (tok.decode || 0) / secs; }
+  p.derived = d;
+  return p;
+}
+
 function refreshNodes() {
   const order = [];
   for (let i = allProfiles.length - 1; i >= 0; i--) {
@@ -368,7 +410,7 @@ function refreshNodes() {
   profiles = allProfiles.filter((p) => (p.node || "node") === selectedNode).slice(-MAX_POINTS);
 }
 function add(p) {
-  allProfiles.push(p);
+  allProfiles.push(derive(p));
   if (allProfiles.length > MAX_POINTS * 4) allProfiles.splice(0, allProfiles.length - MAX_POINTS * 4);
   refreshNodes();
   scheduleRender();
@@ -377,7 +419,7 @@ function add(p) {
 async function start() {
   try {
     const r = await fetch(`/v1/profiles?limit=${MAX_POINTS * 4}`);
-    allProfiles = await r.json();
+    allProfiles = (await r.json()).map(derive);
   } catch (e) { allProfiles = []; }
   refreshNodes();
   document.getElementById("nodeSel").addEventListener("change", (ev) => {

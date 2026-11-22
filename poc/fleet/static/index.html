@@ -39,11 +39,20 @@
 
   <section class="grid2">
     <div class="card">
+      <h2>GPU time by step phase</h2>
+      <p class="desc">Kernel time per 5 s snapshot, attributed through NVTX ranges on each vLLM engine step. vLLM batches prompt processing with ongoing decodes (chunked prefill), so prefill mostly shows as "mixed".</p>
+      <div class="legend" id="lg-phase"></div>
+      <div class="chart" id="ch-phase"></div>
+    </div>
+    <div class="card">
       <h2>Launch → GPU start delay</h2>
       <p class="desc">Time from the CPU launch call (or CUDA graph launch) to the kernel starting on the GPU.</p>
       <div class="legend" id="lg-delay"></div>
       <div class="chart" id="ch-delay"></div>
     </div>
+  </section>
+
+  <section class="grid2">
     <div class="card">
       <h2>Dashboard lag</h2>
       <p class="desc">End of the snapshot window → profile received here. Target: within 5–10 s.</p>
