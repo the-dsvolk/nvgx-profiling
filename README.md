@@ -137,6 +137,9 @@ Full plan, gates and rollback steps: [`plan/`](plan/README.md).
   smoke test, trace vLLM, measure overhead. User-space only, no reboot.
 - **[Option B: native R620 driver](plan/option-b-native-r620.md)** (not needed; kept for reference):
   lift the 580 pin, install R620 with DKMS, enroll a Secure Boot key, run GB10 regression checks.
+- **[NCCL across two DGX Sparks](plan/nccl-two-spark.md)** (stage 1 done 2026-11-22): test NCCL 2.32.6
+  for its profiler-overhead fix, loaded into the same vLLM container on both Sparks (no host install).
+  With NCCL's example profiler plugin, 2.32.6 costs about a third less than 2.31.2; without it they're equal.
 
 Results go in [`results/`](results/). Reusable scripts: [`scripts/`](scripts/); trace queries:
 [`tools/inspect_trace.py`](tools/inspect_trace.py).
