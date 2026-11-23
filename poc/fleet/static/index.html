@@ -41,7 +41,7 @@
   <section class="grid2">
     <div class="card">
       <h2>GPU time by step phase</h2>
-      <p class="desc">Kernel time per 5 s snapshot, attributed through NVTX ranges on each vLLM engine step. vLLM batches prompt processing with ongoing decodes (chunked prefill), so prefill mostly shows as "mixed".</p>
+      <p class="desc">Kernel time per 5 s snapshot, attributed through NVTX ranges on each vLLM engine step. vLLM batches prompt processing with ongoing decodes (chunked prefill), so prefill mostly shows as "mixed". With tensor parallelism, NCCL all-reduce time is carved out of the steps as its own segment (it includes waiting for the other ranks).</p>
       <div class="legend" id="lg-phase"></div>
       <div class="chart" id="ch-phase"></div>
     </div>
@@ -50,6 +50,19 @@
       <p class="desc">Time from the CPU launch call (or CUDA graph launch) to the kernel starting on the GPU.</p>
       <div class="legend" id="lg-delay"></div>
       <div class="chart" id="ch-delay"></div>
+    </div>
+  </section>
+
+  <section class="card hist-card">
+    <div class="card-head">
+      <h2>Latency distributions</h2>
+      <label class="picker">Metric <select id="histSel" aria-label="Latency metric"></select></label>
+    </div>
+    <p class="desc" id="hist-desc"></p>
+    <div class="legend" id="lg-hist"></div>
+    <div class="hist-grid">
+      <div><div class="subhead" id="hist-sub">Last 60 s</div><div class="chart" id="ch-hist"></div></div>
+      <div><div class="subhead">Over time: shade = share of each snapshot's events in that bucket · line = median</div><div class="chart" id="ch-heat"></div></div>
     </div>
   </section>
 

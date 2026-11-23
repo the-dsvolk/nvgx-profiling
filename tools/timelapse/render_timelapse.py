@@ -23,8 +23,8 @@ from PIL import Image
 CHROME = os.environ.get("CHROME", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 
-def shoot(base, recording, frame, window, size, path, profile_dir):
-    url = f"{base}/?replay={recording}&frame={frame}&window={window}"
+def shoot(base, recording, frame, window, size, path, profile_dir, query=""):
+    url = f"{base}/?replay={recording}&frame={frame}&window={window}" + (f"&{query}" if query else "")
     cmd = [CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1",
            "--no-first-run", "--no-default-browser-check", f"--user-data-dir={profile_dir}",
            f"--window-size={size}", "--virtual-time-budget=10000", f"--screenshot={path}", url]
@@ -49,7 +49,9 @@ def main():
     ap.add_argument("--fps", type=float, default=10)
     ap.add_argument("--max-width", type=int, default=1000, help="downscale frames to this width")
     ap.add_argument("--quality", type=int, default=75)
-    ap.add_argument("--keyframes", default="", help="comma-separated snapshot indices to save as PNG")
+    ap.add_argument("--query", default="", help="extra dashboard query, e.g. hist=nccl (latency metric shown)")
+    ap.add_argument("--keyframes", default="",
+                    help="comma-separated snapshot indices to save as PNG; N:metric picks the latency metric, e.g. 110:interval")
     ap.add_argument("--keyframes-dir", default="")
     ap.add_argument("--workers", type=int, default=4)
     args = ap.parse_args()
@@ -69,7 +71,7 @@ def main():
         for k, i in enumerate(frames):
             path = os.path.join(args.frames_dir, f"f{i:04d}.png")
             prof = os.path.join(args.frames_dir, f".chrome{k % args.workers}")
-            futs[ex.submit(shoot, args.base, args.recording, i, args.window, args.size, path, prof)] = i
+            futs[ex.submit(shoot, args.base, args.recording, i, args.window, args.size, path, prof, args.query)] = i
         for done, fut in enumerate(cf.as_completed(futs), 1):
             paths[futs[fut]] = fut.result()
             if done % 20 == 0:
@@ -90,10 +92,13 @@ def main():
 
     if args.keyframes:
         os.makedirs(args.keyframes_dir or os.path.dirname(args.webp), exist_ok=True)
-        for k in [int(x) for x in args.keyframes.split(",") if x.strip()]:
+        for spec in [x.strip() for x in args.keyframes.split(",") if x.strip()]:
+            k, _, metric = spec.partition(":")
+            k = int(k)
+            query = f"hist={metric}" if metric else args.query
             out = os.path.join(args.keyframes_dir or os.path.dirname(args.webp), f"frame-{k:04d}.png")
-            shoot(args.base, args.recording, k, args.window, args.size, out, os.path.join(args.frames_dir, ".chromek"))
-            print(f"key frame {k} -> {out}", flush=True)
+            shoot(args.base, args.recording, k, args.window, args.size, out, os.path.join(args.frames_dir, ".chromek"), query)
+            print(f"key frame {k} ({query or 'default view'}) -> {out}", flush=True)
 
 
 if __name__ == "__main__":

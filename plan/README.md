@@ -38,6 +38,15 @@ Option B isn't needed and is kept for reference only.
 **Option B is worth trying only if** Option A fails on GR-context tracing or GPU-event correlation
 even with the service on the host-matched `libcuda`, or the compat driver doesn't work on GB10.
 
+## Next: NCCL across two DGX Sparks
+
+[`nccl-two-spark.md`](nccl-two-spark.md): profile NCCL once a model runs tensor-parallel over the two Sparks.
+Stage 1 (done 2026-11-22) benchmarked NCCL 2.31.2 (the vLLM image's, and NVIDIA's DGX Spark guide version)
+against 2.32.6 (profiler-overhead fix), both inside the same container on both nodes, with and without
+NCCL's example profiler plugin. Decision: 2.32.6 for the profiling stages, 2.31.2 as the fallback.
+Stage 2 steps 1–2 (done 2026-11-22): vLLM TP=2 across both Sparks, NCCL time on the dashboard, NCCL Inspector
+([results](../results/2026-11-22-nccl-tp2/README.md)).
+
 ## Results log
 
 Record each run in `results/` (date, option, driver/CUDA versions, what passed, what failed, overhead).

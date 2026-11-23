@@ -1,0 +1,113 @@
+{
+  "label": "v2326-noprof-r4",
+  "rank": 1,
+  "world": 2,
+  "nccl_version_loaded": "2.32.6",
+  "nccl_libs_mapped": [
+    "/lab/nccl-2.32.6/usr/lib/aarch64-linux-gnu/libnccl.so.2.32.6",
+    "/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2"
+  ],
+  "torch_nccl_build": "2.30.7",
+  "torch": "2.14.0+cu130",
+  "repeats": 3,
+  "env": {
+    "NCCL_IB_GID_INDEX": "3",
+    "NCCL_IB_DISABLE": "0",
+    "NCCL_SOCKET_IFNAME": "enp1s0f0np0,enP2p1s0f0np0",
+    "NCCL_IB_HCA": "rocep1s0f0,roceP2p1s0f0",
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,NET,ENV",
+    "LD_PRELOAD": "/lab/nccl-2.32.6/usr/lib/aarch64-linux-gnu/libnccl.so.2",
+    "NCCL_PROFILER_PLUGIN": "none"
+  },
+  "results": [
+    {
+      "size_bytes": 4096,
+      "size": "4 KB",
+      "pipelined_us": 15.17,
+      "synced_p50_us": 25.39,
+      "synced_p95_us": 28.1,
+      "busbw_GBps": 0.27
+    },
+    {
+      "size_bytes": 8192,
+      "size": "8 KB",
+      "pipelined_us": 17.23,
+      "synced_p50_us": 26.77,
+      "synced_p95_us": 30.5,
+      "busbw_GBps": 0.476
+    },
+    {
+      "size_bytes": 16384,
+      "size": "16 KB",
+      "pipelined_us": 19.07,
+      "synced_p50_us": 28.38,
+      "synced_p95_us": 30.37,
+      "busbw_GBps": 0.859
+    },
+    {
+      "size_bytes": 32768,
+      "size": "32 KB",
+      "pipelined_us": 21.88,
+      "synced_p50_us": 31.65,
+      "synced_p95_us": 33.95,
+      "busbw_GBps": 1.498
+    },
+    {
+      "size_bytes": 65536,
+      "size": "64 KB",
+      "pipelined_us": 30.63,
+      "synced_p50_us": 40.86,
+      "synced_p95_us": 46.21,
+      "busbw_GBps": 2.14
+    },
+    {
+      "size_bytes": 131072,
+      "size": "128 KB",
+      "pipelined_us": 39.54,
+      "synced_p50_us": 46.42,
+      "synced_p95_us": 48.54,
+      "busbw_GBps": 3.315
+    },
+    {
+      "size_bytes": 262144,
+      "size": "256 KB",
+      "pipelined_us": 57.53,
+      "synced_p50_us": 61.14,
+      "synced_p95_us": 66.61,
+      "busbw_GBps": 4.557
+    },
+    {
+      "size_bytes": 1048576,
+      "size": "1 MB",
+      "pipelined_us": 460.67,
+      "synced_p50_us": 463.04,
+      "synced_p95_us": 1147.27,
+      "busbw_GBps": 2.276
+    },
+    {
+      "size_bytes": 4194304,
+      "size": "4 MB",
+      "pipelined_us": 331.93,
+      "synced_p50_us": 338.99,
+      "synced_p95_us": 347.28,
+      "busbw_GBps": 12.636
+    },
+    {
+      "size_bytes": 16777216,
+      "size": "16 MB",
+      "pipelined_us": 770.72,
+      "synced_p50_us": 839.83,
+      "synced_p95_us": 862.41,
+      "busbw_GBps": 21.768
+    },
+    {
+      "size_bytes": 67108864,
+      "size": "64 MB",
+      "pipelined_us": 3328.1,
+      "synced_p50_us": 3410.67,
+      "synced_p95_us": 3681.24,
+      "busbw_GBps": 20.164
+    }
+  ]
+}

@@ -18,7 +18,7 @@ nvtrace_continuous_export (forked) --snapshot-ms 5000              ├ GET  /eve
 | [`agent/NvgxFleetSink.h`](agent/NvgxFleetSink.h) | GPU node | `FleetSink`: a table sink with the same 7 methods as NVIDIA's DuckDB sink. Aggregates each snapshot's rows into a workload profile (kernel time by family, tiny-kernel share, CUDA-graph share, launch → GPU start delay, CPU sync wait, memcpy, GPU counters, verdict; with [NVTX step ranges](nvtx/README.md), GPU time by prefill / decode / mixed step) and POSTs it from a background thread with a bounded queue. `TeeSink` feeds DuckDB and FleetSink together. |
 | [`agent/apply_fleet_patch.py`](agent/apply_fleet_patch.py) | GPU node | Applies 9 anchored edits to NVIDIA's `nvtrace_continuous_export.cpp` (SDK `beta-preview-update1`): include the header, add `--fleet-url` / `--fleet-node`, export through the TeeSink. |
 | [`fleet/nvgx_fleet.py`](fleet/nvgx_fleet.py) | Mac | Fleet service, Python standard library only: receive profiles, store in SQLite (`~/.nvgx-fleet/fleet.db`), push to browsers over server-sent events, serve the dashboard. |
-| [`fleet/static/`](fleet/static/) | Mac | Dashboard: node filter, stat tiles (verdict, GPU busy, SM/Tensor, launch delay, decode share, prefill/decode tokens/s, lag), GPU utilization, GPU time by kernel family, GPU time by step phase (NVTX), launch delay, lag, tables. Vanilla JS + SVG, light and dark mode; keeps updating in background tabs. |
+| [`fleet/static/`](fleet/static/) | Mac | Dashboard: node filter, stat tiles (verdict, GPU busy, SM/Tensor, launch delay, decode share, prefill/decode tokens/s, NCCL share with tensor parallelism, lag), GPU utilization, GPU time by kernel family, GPU time by step phase (NVTX), launch delay, latency distributions (histogram + heatmap per metric), lag, tables. Vanilla JS + SVG, light and dark mode; keeps updating in background tabs. |
 
 The POC posts straight to the fleet service. In production a message bus (Kafka, Pub/Sub, NATS) sits in
 between; see the design doc.
@@ -141,6 +141,49 @@ The variable workload ([`workload/`](workload/README.md)) cycles through regimes
 burst, steady-high and idle gaps. They show up as changing verdicts (host-bound in light regimes,
 launch/sync-bound under load) and phase splits (decode share ~99% in decode-heavy regimes, mixed steps rising
 with long prompts).
+
+## Tensor parallelism: NCCL time (2026-11-22)
+
+With vLLM split across two DGX Sparks ([`nccl/run_vllm_tp2.sh`](nccl/run_vllm_tp2.sh)), the SDK already traces
+NCCL's all-reduce kernels on the traced rank, CUDA graphs included; no NCCL plugin is needed for this view.
+FleetSink adds:
+
+```jsonc
+"role": "TP rank 0 of 2 · NCCL 2.32.6",          // optional, from NVGX_FLEET_ROLE in the exporter's environment
+"attribution": { "...": "...",
+  "by_kernel_family_ms": { "...": "...", "nccl": 1264.9 },                       // ncclDevKernel_* / ncclKernel_*
+  "by_phase_nccl_ms": {"prefill": 0.0, "decode": 662.5, "mixed": 602.4, "unattributed": 0.0} }  // NCCL part of by_phase_ms
+```
+
+The dashboard shows NCCL as its own kernel family (palette slot 8, red), an **NCCL share of GPU time** tile
+(with the share inside decode and mixed steps), NCCL as a separate segment in the step-phase chart, and the
+role next to the node name. An NCCL kernel's time includes **waiting for the other ranks**, not just transfer.
+Results: [`results/2026-11-22-nccl-tp2/`](../results/2026-11-22-nccl-tp2/README.md).
+
+## Latency histograms (2026-11-22)
+
+Averages and p95 tiles hide shapes (two humps, a growing tail). FleetSink also counts five latencies into fixed
+**log2 buckets in microseconds** (bucket i = [2^i, 2^(i+1)) µs, 21 buckets up to ≥ ~1 s). The buckets are the same
+for every node and snapshot, so a fleet-wide or hour-long histogram is a plain sum:
+
+```jsonc
+"histograms": {
+  "nccl_kernel_us":   {"prefill": [...], "decode": [...], "mixed": [...], "unattributed": [...]}, // NCCL kernel GPU time, by step phase
+  "step_interval_us": {"prefill": [...], "decode": [...], "mixed": [...]},  // step start -> next step start (real per-step cadence)
+  "step_us":          {"prefill": [...], "decode": [...], "mixed": [...]},  // a step's NVTX range on the CPU (host-side only)
+  "launch_to_start_us": [...],                                                // CPU launch -> kernel start on the GPU
+  "sync_wait_us": [...]                                                       // each cuda*Synchronize call
+}
+```
+
+- NCCL kernels in CUDA graphs take their graph exec's dominant phase.
+- Step intervals skip gaps ≥ 1 s (idle) and < 100 µs (duplicate starts).
+- vLLM's async scheduling closes a step's NVTX range before its GPU work ends, so `step_us` is CPU time.
+  `step_interval_us` is the one that tracks time per token.
+
+The dashboard's **Latency distributions** card has a metric picker, the last 60 s as a histogram (log-x,
+stacked by phase, p50/p99 markers) and a time × bucket heatmap (shade = share of each snapshot's events, line =
+median). About 150 integers per profile; one increment per event in the exporter.
 
 ## Limits (POC)
 
