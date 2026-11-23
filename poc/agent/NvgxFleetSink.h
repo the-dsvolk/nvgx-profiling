@@ -210,6 +210,23 @@ namespace nvgx {
         return (p && d) ? PhaseMixed : (p ? PhasePrefill : PhaseDecode);
     }
 
+    // ---------- latency histograms ----------
+    // Fixed log2 buckets in microseconds, the same for every metric and node so histograms can be summed:
+    // bucket i holds [2^i, 2^(i+1)) us; bucket 0 also holds < 1 us, the last bucket everything >= 2^20 us (~1 s).
+    constexpr int kHistBuckets = 21;
+    using Hist = std::array<uint32_t, kHistBuckets>;
+    inline int HistBucket(uint64_t ns)
+    {
+        uint64_t us = ns / 1000;
+        int b = 0;
+        while (us >= 2 && b < kHistBuckets - 1)
+        {
+            us >>= 1;
+            ++b;
+        }
+        return b;
+    }
+
     // ---------- minimal JSON writer ----------
     class Json
     {
@@ -469,7 +486,10 @@ namespace nvgx {
                 m_snap.apiCalls++;
                 m_snap.apiThreads.insert(U64(v, n, 3).value_or(0));
                 if (start && end && *end > *start && Str(v, n, 8).find("Synchronize") != std::string_view::npos)
+                {
                     m_snap.syncNs += *end - *start;
+                    m_snap.syncHist[HistBucket(*end - *start)]++;
+                }
                 if (start)
                     m_apiStartNew[{proc, U64(v, n, 4).value_or(0)}] = *start;
                 break;
@@ -556,6 +576,13 @@ namespace nvgx {
                 m_snap.phaseTokens[0] += p;
                 m_snap.phaseTokens[1] += d;
                 m_snap.phaseSteps[phase]++;
+                // Step duration on the CPU: from execute_model to that step's sample_tokens (see poc/nvtx). With async
+                // scheduling the GPU work continues after the range closes, so this is host-side step time.
+                if (const auto start = U64(v, n, 5); start && *end > *start)
+                {
+                    m_snap.stepHist[phase][HistBucket(*end - *start)]++;
+                    m_snap.stepStarts[thread].push_back({*start, static_cast<int8_t>(phase)});
+                }
                 break;
             }
             case TableIndex_NvtxGpuProjectionSegments:
@@ -709,6 +736,11 @@ namespace nvgx {
             std::unordered_map<Key, PhaseCounts, PairHash> execLaunches;       // (proc, graph exec) -> launches by phase
             uint64_t phaseNs[PhaseCount] = {};
             uint64_t phaseNcclNs[PhaseCount] = {}; // NCCL part of phaseNs
+            Hist ncclHist[PhaseCount] = {};         // NCCL kernel durations by step phase
+            Hist stepHist[3] = {};                  // engine step durations (CPU) by phase
+            Hist stepIntervalHist[3] = {};          // step start -> next step start on the same thread, by the later step's phase
+            std::unordered_map<Key, std::vector<std::pair<uint64_t, int8_t>>, PairHash> stepStarts; // thread -> (start, phase)
+            Hist syncHist = {};                     // CUDA *Synchronize call durations
             uint64_t phaseTokens[2] = {};
             uint64_t phaseSteps[3] = {};
         };
@@ -789,24 +821,43 @@ namespace nvgx {
                 s.phaseNs[phase] += ns;
                 s.phaseNcclNs[phase] += ncclNs;
             };
+            std::vector<std::pair<Key, uint64_t>> ncclGraphKernels; // (graph exec, duration): histogram after the loop
             for (const KernelRec& k : s.kernelRecs)
             {
                 const uint64_t ncclNs = k.nccl ? k.durNs : 0;
                 if (!k.graph)
                 {
                     const int8_t* ph = FindIn(m_kernelPhaseNew, m_kernelPhasePrev, {k.proc, k.id});
-                    add(ph ? int(*ph) : int(PhaseUnattributed), k.durNs, ncclNs);
+                    const int phase = ph ? int(*ph) : int(PhaseUnattributed);
+                    add(phase, k.durNs, ncclNs);
+                    if (k.nccl)
+                        s.ncclHist[phase][HistBucket(k.durNs)]++;
                     continue;
                 }
                 auto it = m_nodeExec.find({k.proc, k.id});
                 if (it == m_nodeExec.end())
+                {
                     add(PhaseUnattributed, k.durNs, ncclNs);
+                    if (k.nccl)
+                        s.ncclHist[PhaseUnattributed][HistBucket(k.durNs)]++;
+                }
                 else
                 {
                     auto& e = execNs[{k.proc, it->second}];
                     e.first += k.durNs;
                     e.second += ncclNs;
+                    if (k.nccl)
+                        ncclGraphKernels.push_back({{k.proc, it->second}, k.durNs});
                 }
+            }
+            // A graph kernel's histogram sample goes to its exec's dominant phase (an exec is almost always one phase).
+            for (const auto& [exec, dur] : ncclGraphKernels)
+            {
+                const PhaseCounts* c = FindIn(s.execLaunches, m_execLaunchesPrev, exec);
+                int phase = PhaseUnattributed;
+                if (c && (*c)[0] + (*c)[1] + (*c)[2])
+                    phase = static_cast<int>(std::max_element(c->begin(), c->end()) - c->begin());
+                s.ncclHist[phase][HistBucket(dur)]++;
             }
             for (const auto& [exec, ns] : execNs)
             {
@@ -925,6 +976,62 @@ namespace nvgx {
             }
             j.Key("cpu_sync_wait_pct").Num(sync, 1).End('}');
 
+            // Latency histograms: fixed log2 buckets in us (see HistBucket), summable across snapshots and nodes.
+            auto hist = [&j](const Hist& h) {
+                j.Begin('[');
+                for (uint32_t c : h)
+                    j.Int(c);
+                j.End(']');
+            };
+            Hist launchHist = {};
+            for (double ms : s.delaysMs)
+                launchHist[HistBucket(static_cast<uint64_t>(ms * 1e6))]++;
+            // Step interval: the engine's real per-step cadence (CPU + GPU), what each decode token waits for.
+            // Gaps of 1 s or more are idle time between requests, not step latency, and are skipped; so are gaps under
+            // 100 us (no engine step is that short: duplicate starts).
+            for (auto& [thread, starts] : s.stepStarts)
+            {
+                std::sort(starts.begin(), starts.end());
+                uint64_t prev = 0;
+                if (auto it = m_lastStepStart.find(thread); it != m_lastStepStart.end())
+                    prev = it->second;
+                for (const auto& [start, phase] : starts)
+                {
+                    if (prev && start >= prev + 100'000ULL && start - prev < 1'000'000'000ULL)
+                        s.stepIntervalHist[phase][HistBucket(start - prev)]++;
+                    prev = std::max(prev, start);
+                }
+                m_lastStepStart[thread] = prev;
+            }
+            j.Key("histograms").Begin('{');
+            j.Key("buckets").Text("log2_us: bucket i = [2^i, 2^(i+1)) us; first also < 1 us, last >= 2^20 us");
+            j.Key("nccl_kernel_us").Begin('{');
+            for (int p = 0; p < PhaseCount; ++p)
+            {
+                j.Key(PhaseName(p));
+                hist(s.ncclHist[p]);
+            }
+            j.End('}');
+            j.Key("step_us").Begin('{');
+            for (int p = 0; p < 3; ++p)
+            {
+                j.Key(PhaseName(p));
+                hist(s.stepHist[p]);
+            }
+            j.End('}');
+            j.Key("step_interval_us").Begin('{');
+            for (int p = 0; p < 3; ++p)
+            {
+                j.Key(PhaseName(p));
+                hist(s.stepIntervalHist[p]);
+            }
+            j.End('}');
+            j.Key("launch_to_start_us");
+            hist(launchHist);
+            j.Key("sync_wait_us");
+            hist(s.syncHist);
+            j.End('}');
+
             j.Key("memory").Begin('{');
             j.Key("h2d_bytes").Int(s.h2d).Key("d2h_bytes").Int(s.d2h).Key("d2d_bytes").Int(s.d2d);
             j.Key("copies").Int(s.copies).Key("tiny_copies").Int(s.tinyCopies).Key("copy_time_pct").Num(copyPct, 1).End('}');
@@ -980,6 +1087,7 @@ namespace nvgx {
         std::unordered_map<Key, uint64_t, PairHash> m_nodeExec;                        // (proc, graph node corr) -> exec
         std::unordered_map<Key, PhaseCounts, PairHash> m_execLaunchesPrev;             // previous snapshot's counts
         std::unordered_map<Key, uint64_t, PairHash> m_rangeWatermark, m_rangeWatermarkNext; // (proc, thread) -> last end counted
+        std::unordered_map<Key, uint64_t, PairHash> m_lastStepStart;                         // (proc, thread) -> last step start (intervals)
     };
 
     // Feeds every row to two sinks (e.g. DuckDB for local storage + FleetSink for the fleet).

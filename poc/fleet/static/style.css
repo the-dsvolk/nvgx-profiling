@@ -70,6 +70,16 @@ h1 { font-size: 20px; font-weight: 600; margin: 0; }
 .chart text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart .dlabel { fill: var(--text-secondary); font-size: 11px; }
 
+.hist-card { margin-bottom: 12px; }
+.card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+.picker { color: var(--text-secondary); font-size: 13px; }
+.picker select {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; margin-left: 4px;
+}
+.hist-grid { display: grid; grid-template-columns: minmax(300px, 2fr) minmax(400px, 3fr); gap: 16px; }
+@media (max-width: 900px) { .hist-grid { grid-template-columns: 1fr; } }
+.subhead { color: var(--text-muted); font-size: 12px; margin: 2px 0 2px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 6px; color: var(--text-secondary); font-size: 12px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }

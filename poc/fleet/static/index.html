@@ -53,6 +53,19 @@
     </div>
   </section>
 
+  <section class="card hist-card">
+    <div class="card-head">
+      <h2>Latency distributions</h2>
+      <label class="picker">Metric <select id="histSel" aria-label="Latency metric"></select></label>
+    </div>
+    <p class="desc" id="hist-desc"></p>
+    <div class="legend" id="lg-hist"></div>
+    <div class="hist-grid">
+      <div><div class="subhead" id="hist-sub">Last 60 s</div><div class="chart" id="ch-hist"></div></div>
+      <div><div class="subhead">Over time: shade = share of each snapshot's events in that bucket · line = median</div><div class="chart" id="ch-heat"></div></div>
+    </div>
+  </section>
+
   <section class="grid2 lag-card">
     <div class="card">
       <h2>Dashboard lag</h2>

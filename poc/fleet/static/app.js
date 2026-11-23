@@ -27,6 +27,29 @@ const PHASES = [
 ];
 // Tensor parallel: NCCL time is taken out of the phases above and stacked as its own segment.
 const PHASES_WITH_NCCL = [...PHASES, ["nccl", "NCCL all-reduce (any step)", NCCL_COLOR]];
+// Latency histograms from FleetSink: fixed log2 buckets, bucket i = [2^i, 2^(i+1)) us (21 buckets, last >= ~1 s).
+const STEP_SERIES = [
+  ["decode", "Decode-only steps", seriesColor(0)],
+  ["mixed", "Mixed steps", seriesColor(1)],
+  ["prefill", "Prefill-only steps", seriesColor(2)],
+];
+const HIST_METRICS = [
+  { key: "nccl", label: "NCCL kernel duration", field: "histograms.nccl_kernel_us",
+    series: [...STEP_SERIES, ["unattributed", "Outside any step", "var(--text-muted)"]],
+    desc: "GPU time of each NCCL collective kernel, by the engine step it ran in. Includes waiting for the other ranks, so a long tail means a late peer, not a slow link." },
+  { key: "interval", label: "Engine step interval", field: "histograms.step_interval_us", series: STEP_SERIES,
+    desc: "Time from one vLLM engine step's start to the next (NVTX step ranges, same thread), by the later step's type: the real per-step cadence, CPU and GPU, i.e. what each decode token waits for. Gaps of 1 s or more (idle) are left out." },
+  { key: "step", label: "Engine step CPU time", field: "histograms.step_us", series: STEP_SERIES,
+    desc: "Host-side time of each engine step's NVTX range (execute_model → sample_tokens). With async scheduling the GPU work continues after the range closes, so this is CPU time, not token latency." },
+  { key: "launch", label: "Launch → GPU start", field: "histograms.launch_to_start_us", series: null,
+    desc: "Time from the CPU launch call (or CUDA graph launch) to the kernel starting on the GPU: queueing on the GPU." },
+  { key: "sync", label: "CPU sync wait", field: "histograms.sync_wait_us", series: null,
+    desc: "Duration of each cuda*Synchronize call: how long the host blocks waiting for the GPU." },
+];
+const HIST_BUCKETS = 21;
+const HIST_RECENT = 12; // histogram panel: sum of the last 12 snapshots (60 s)
+let histMetric = "nccl";
+
 let allProfiles = []; // every node
 let profiles = [];    // the selected node's, used by all charts and tables
 let selectedNode = null;
@@ -244,6 +267,175 @@ function stackedChart(container, legendEl, { series, field, height = 230 }) {
   hit.addEventListener("pointerleave", () => { if (last >= 0 && cols[last]) cols[last].style.opacity = ""; tt.style.display = "none"; });
 }
 
+// ---------- latency histograms ----------
+function bucketEdge(i) { // lower edge of bucket i, as text
+  const us = Math.pow(2, i);
+  if (us < 1000) return `${us} µs`;
+  if (us < 1e6) { const ms = us / 1000; return `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`; }
+  return `${(us / 1e6).toFixed(1)} s`;
+}
+const bucketRange = (i) => (i === 0 ? `< 2 µs` : i === HIST_BUCKETS - 1 ? `≥ ${bucketEdge(i)}` : `${bucketEdge(i)} – ${bucketEdge(i + 1)}`);
+// Per profile: [series][bucket] counts, or null if the profile has no such histogram.
+function histOf(p, m) {
+  const h = get(p, m.field);
+  if (!h) return null;
+  if (!m.series) return Array.isArray(h) ? [h] : null;
+  return m.series.map(([k]) => h[k] || new Array(HIST_BUCKETS).fill(0));
+}
+function quantileBucket(counts, q) {
+  const tot = counts.reduce((a, b) => a + b, 0);
+  if (!tot) return null;
+  let cum = 0;
+  for (let i = 0; i < counts.length; i++) { cum += counts[i]; if (cum >= q * tot) return i; }
+  return counts.length - 1;
+}
+
+function renderHist() {
+  const m = HIST_METRICS.find((x) => x.key === histMetric) || HIST_METRICS[0];
+  const sel = document.getElementById("histSel");
+  if (!sel.options.length) {
+    for (const x of HIST_METRICS) h("option", { value: x.key }, sel, x.label);
+    sel.addEventListener("change", () => { histMetric = sel.value; scheduleRender(); });
+  }
+  sel.value = m.key;
+  document.getElementById("hist-desc").textContent = m.desc;
+  const series = m.series || [["all", m.label, seriesColor(0)]];
+  legend(document.getElementById("lg-hist"), series.map(([, label, color]) => ({ label, color })), "rect");
+  const histEl = document.getElementById("ch-hist"), heatEl = document.getElementById("ch-heat");
+  const per = profiles.map((p) => histOf(p, m));
+  const have = per.filter(Boolean);
+  if (!have.length) {
+    for (const el of [histEl, heatEl]) el.replaceChildren(h("div", { class: "empty" }, null, "No histograms yet (needs the exporter build with latency histograms)"));
+    return;
+  }
+  // Shared bucket range for both panels: buckets holding at least 0.1% of the visible window's events (stray
+  // outliers don't stretch the axis; they still count in shares and quantiles), at least 8 wide.
+  const colTot = (hs) => (hs ? hs[0].map((_, b) => hs.reduce((a, s) => a + s[b], 0)) : null);
+  const totals = per.map(colTot);
+  const winTot = new Array(HIST_BUCKETS).fill(0);
+  for (const t of totals) if (t) t.forEach((c, b) => { winTot[b] += c; });
+  const winSum = winTot.reduce((a, b) => a + b, 0);
+  let lo = HIST_BUCKETS, hi = -1;
+  winTot.forEach((c, b) => { if (c && c >= 0.001 * winSum) { lo = Math.min(lo, b); hi = Math.max(hi, b); } });
+  if (hi < 0) { lo = 0; hi = 7; }
+  while (hi - lo < 7) { if (lo > 0) lo--; if (hi - lo < 7 && hi < HIST_BUCKETS - 1) hi++; if (lo === 0 && hi === HIST_BUCKETS - 1) break; }
+  const nb = hi - lo + 1;
+
+  // Panel 1: sum of the last HIST_RECENT snapshots, stacked by series, as share of events.
+  const recent = per.slice(-HIST_RECENT).filter(Boolean);
+  document.getElementById("hist-sub").textContent = `Last ${recent.length * 5} s (${recent.length} snapshots)`;
+  const agg = series.map((_, si) => Array.from({ length: HIST_BUCKETS }, (_, b) => recent.reduce((a, hs) => a + hs[si][b], 0)));
+  const aggTot = agg[0].map((_, b) => agg.reduce((a, s) => a + s[b], 0));
+  const events = aggTot.reduce((a, b) => a + b, 0);
+  {
+    const card = histEl.closest(".card");
+    const f = frame(histEl, 252, { l: 40, r: 10, t: 34, b: 30 });
+    const { svg, m: mg, pw, ph } = f;
+    const shares = aggTot.slice(lo, hi + 1).map((c) => (events ? (100 * c) / events : 0));
+    const top = niceMax(Math.max(...shares, 1) * 1.1);
+    for (const v of ticks(top)) {
+      const y = mg.t + ph - (v / top) * ph;
+      s("line", { x1: mg.l, x2: mg.l + pw, y1: y, y2: y, "stroke-width": 1 }, svg, { stroke: v === 0 ? "var(--axis)" : "var(--grid)" });
+      s("text", { x: mg.l - 6, y: y + 4, "text-anchor": "end" }, svg).textContent = `${tickLabel(v)}%`;
+    }
+    const band = pw / nb, bw = Math.max(2, band - 2);
+    for (let k = 0; k < nb; k++) {
+      const b = lo + k, x = mg.l + k * band + 1;
+      let base = mg.t + ph;
+      series.forEach(([, , color], si) => {
+        const v = events ? (100 * agg[si][b]) / events : 0;
+        const hgt = (v / top) * ph;
+        if (hgt < 0.5) return;
+        s("rect", { x, y: base - hgt, width: bw, height: Math.max(0.5, hgt - (si ? 1 : 0)), rx: 1.5 }, svg, { fill: color });
+        base -= hgt;
+      });
+      if (k % 2 === 0 || nb <= 10) {
+        s("text", { x: x + bw / 2, y: mg.t + ph + 14, "text-anchor": "middle" }, svg).textContent = bucketEdge(b);
+      }
+    }
+    // p50 / p99 markers (bucket resolution), labels on separate lines so adjacent buckets don't collide.
+    [[0.5, "p50", 22], [0.99, "p99", 8]].forEach(([q, name, dy]) => {
+      const qb = quantileBucket(aggTot, q);
+      if (qb == null || qb < lo || qb > hi) return;
+      const x = mg.l + (qb - lo + 0.5) * band;
+      s("line", { x1: x, x2: x, y1: mg.t - dy + 4, y2: mg.t + ph, "stroke-width": 1, "stroke-dasharray": "3 3" }, svg, { stroke: "var(--text-secondary)" });
+      const anchor = x < mg.l + pw * 0.25 ? "start" : x > mg.l + pw * 0.75 ? "end" : "middle";
+      s("text", { x: anchor === "start" ? x - 4 : anchor === "end" ? x + 4 : x, y: mg.t - dy, "text-anchor": anchor, class: "dlabel" }, svg).textContent = `${name} ${bucketRange(qb)}`;
+    });
+    s("text", { x: mg.l + pw, y: mg.t + ph + 28, "text-anchor": "end" }, svg).textContent = `${events.toLocaleString()} events · log scale`;
+    const hit = s("rect", { x: mg.l, y: mg.t, width: pw, height: ph, fill: "transparent" }, svg);
+    const tt = tooltip(card);
+    hit.addEventListener("pointermove", (ev) => {
+      const r = svg.getBoundingClientRect();
+      const k = Math.max(0, Math.min(nb - 1, Math.floor((((ev.clientX - r.left) / r.width) * f.width - mg.l) / band)));
+      const b = lo + k;
+      fillTooltip(tt, `${bucketRange(b)} · ${events ? fmtPct((100 * aggTot[b]) / events) : "–"} of events`,
+        series.map(([, label, color], si) => ({ color, label, value: agg[si][b].toLocaleString() })));
+      const cr = card.getBoundingClientRect();
+      placeTooltip(tt, card, ev.clientX - cr.left, ev.clientY - cr.top);
+    });
+    hit.addEventListener("pointerleave", () => { tt.style.display = "none"; });
+  }
+
+  // Panel 2: heatmap, time x bucket; shade = share of that snapshot's events; line = median bucket.
+  {
+    const card = heatEl.closest(".card");
+    const n = profiles.length;
+    const f = frame(heatEl, 252, { l: 56, r: 10, t: 34, b: 30 });
+    const { svg, m: mg, pw, ph } = f;
+    const cw = pw / Math.max(n, 1), rh = ph / nb;
+    const shareAt = (i, b) => { const t = totals[i]; if (!t) return 0; const sum = t.reduce((a, c) => a + c, 0); return sum ? t[b] / sum : 0; };
+    let maxShare = 0;
+    for (let i = 0; i < n; i++) for (let b = lo; b <= hi; b++) maxShare = Math.max(maxShare, shareAt(i, b));
+    for (let i = 0; i < n; i++) {
+      if (!totals[i]) continue;
+      for (let b = lo; b <= hi; b++) {
+        const v = shareAt(i, b);
+        if (!v) continue;
+        s("rect", { x: mg.l + i * cw, y: mg.t + (hi - b) * rh, width: Math.max(1, cw - (cw > 4 ? 1 : 0)), height: Math.max(1, rh - 1) }, svg,
+          { fill: "var(--series-1)", fillOpacity: String(0.08 + 0.92 * Math.sqrt(v / (maxShare || 1))) });
+      }
+    }
+    // Median line.
+    let d = "", pen = false;
+    for (let i = 0; i < n; i++) {
+      const qb = totals[i] ? quantileBucket(totals[i], 0.5) : null;
+      if (qb == null) { pen = false; continue; }
+      const x = mg.l + (i + 0.5) * cw, y = mg.t + (hi - qb + 0.5) * rh;
+      d += `${pen ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+      pen = true;
+    }
+    if (d) s("path", { d, fill: "none", "stroke-width": 1.5, "stroke-linejoin": "round" }, svg, { stroke: "var(--text-primary)" });
+    for (let b = lo; b <= hi; b += nb > 10 ? 2 : 1) {
+      s("text", { x: mg.l - 6, y: mg.t + (hi - b + 0.5) * rh + 4, "text-anchor": "end" }, svg).textContent = bucketEdge(b);
+    }
+    const labels = Math.min(5, n);
+    for (let k = 0; k < labels; k++) {
+      const i = labels === 1 ? n - 1 : Math.round((k * (n - 1)) / (labels - 1));
+      s("text", { x: mg.l + (i + 0.5) * cw, y: mg.t + ph + 16, "text-anchor": k === 0 && labels > 1 ? "start" : k === labels - 1 ? "end" : "middle" }, svg).textContent = timeLabel(profiles[i]);
+    }
+    const hit = s("rect", { x: mg.l, y: mg.t, width: pw, height: ph, fill: "transparent" }, svg);
+    const tt = tooltip(card);
+    hit.addEventListener("pointermove", (ev) => {
+      const r = svg.getBoundingClientRect();
+      const sx = ((ev.clientX - r.left) / r.width) * f.width, sy = ((ev.clientY - r.top) / r.height) * f.height;
+      const i = Math.max(0, Math.min(n - 1, Math.floor((sx - mg.l) / cw)));
+      const b = Math.max(lo, Math.min(hi, hi - Math.floor((sy - mg.t) / rh)));
+      const t = totals[i];
+      const sum = t ? t.reduce((a, c) => a + c, 0) : 0;
+      const med = t ? quantileBucket(t, 0.5) : null;
+      fillTooltip(tt, `${timeLabel(profiles[i])} · ${bucketRange(b)}`, [
+        { color: "var(--series-1)", label: "of this snapshot's events", value: t && sum ? fmtPct((100 * t[b]) / sum) : "–" },
+        { color: "transparent", label: "events in bucket", value: t ? t[b].toLocaleString() : "–" },
+        { color: "var(--text-primary)", label: "median", value: med == null ? "–" : bucketRange(med) },
+      ]);
+      const cr = card.getBoundingClientRect();
+      placeTooltip(tt, card, ev.clientX - cr.left, ev.clientY - cr.top);
+    });
+    hit.addEventListener("pointerleave", () => { tt.style.display = "none"; });
+  }
+}
+
 function sparkline(parent, values) {
   const w = 140, hgt = 26, pts = values.slice(-24);
   const svg = s("svg", { viewBox: `0 0 ${w} ${hgt}`, width: w, height: hgt, "aria-hidden": "true" }, parent);
@@ -364,6 +556,7 @@ function render() {
       { label: "p95", color: seriesColor(1), get: (q) => get(q, "launch_path.launch_to_start_ms_p95") },
     ],
   });
+  renderHist();
   lineChart(document.getElementById("ch-lag"), null, {
     fmt: { value: fmtS, axis: null },
     ref: { value: 10, label: "10 s target" },

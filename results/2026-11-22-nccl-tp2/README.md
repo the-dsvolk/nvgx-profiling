@@ -102,13 +102,33 @@ the NCCL share the SDK measures. Its real cost is **output volume**: 1.5 GB of J
 per collective). For always-on use that calls for Inspector's aggregated OTLP / Prometheus modes, or our own
 plugin that aggregates per window ([plan, stage 3](../../plan/nccl-two-spark.md#stages)).
 
+## Latency distributions
+
+Added after the runs above: FleetSink now also sends log2 latency histograms
+([`poc/README.md`](../../poc/README.md#latency-histograms-2026-11-22)), and the dashboard shows them per metric.
+The same seeded workload under TP=2 (decode-heavy part of the run):
+
+![Latency distributions: NCCL kernel duration, engine step interval, launch → GPU start, CPU sync wait](img/latency-histograms.png)
+
+| Metric | p50 | p99 | Shape |
+|---|---|---|---|
+| NCCL kernel duration | 16–32 µs | 512 µs–1 ms | Decode all-reduces in one tight bucket; mixed-step (prefill) all-reduces form a second hump at 128–512 µs |
+| Engine step interval | 8–16 ms | 33–66 ms | Time per decode step; mixed steps sit in the tail |
+| Launch → GPU start | 16–33 ms | 33–66 ms | Wide: work is queued on the GPU several steps ahead |
+| CPU sync wait | 8–16 ms | 33–66 ms | The host blocks for about one step per sync |
+
+The NCCL histogram matches Inspector's per-size numbers (decode p50 9–22 µs, prefill-sized ~270 µs) without
+loading any NCCL plugin. *The faint 1 µs strip in the step-interval heatmap comes from profiles sent before
+duplicate step starts were filtered out.*
+
 ## Problems found
 
 - **The exporter can't keep up under TP=2 load.** Dashboard lag rose to 13–16 s (target 5–10 s), and
   baseline 2 produced 100 profiles in 650 s instead of ~130: snapshots took longer than their 5 s window.
   The traced rank launched 31,000–78,000 kernels per second in this run, ~5,000 of them all-reduces.
   The DuckDB copy is the known slow path ([POC README](../../poc/README.md)); running
-  FleetSink without it is the next thing to try.
+  FleetSink without it is the next thing to try. Supporting that: after restarting the exporter with a fresh
+  output folder (an empty DuckDB), lag under the same load was back to 3–5 s.
 - **The verdict doesn't know about communication.** With a quarter of kernel time in NCCL it says
   "mixed" or "host-bound". A "communication-bound" verdict (NCCL share above a threshold) is an easy addition.
 - **One-sided view.** As planned, only the head is traced; which rank was late stays unknown.
