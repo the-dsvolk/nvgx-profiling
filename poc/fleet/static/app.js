@@ -5,7 +5,7 @@ const MAX_POINTS = 180; // 15 minutes of 5 s snapshots
 const FAMILIES = [
   ["gemm", "GEMM (CUTLASS / nvjet)"], ["flash_attention", "FlashAttention"], ["pytorch_native", "PyTorch native"],
   ["flashinfer_sampling", "FlashInfer sampling"], ["vllm_custom", "vLLM custom"], ["other", "Other"],
-  ["unresolved", "Unresolved names"],
+  ["unresolved", "Unresolved names"], ["nccl", "NCCL collectives"],
 ];
 const VERDICTS = {
   idle: ["Idle", "GPU busy < 10%"],
@@ -17,6 +17,7 @@ const VERDICTS = {
 };
 const SVG = "http://www.w3.org/2000/svg";
 const seriesColor = (i) => `var(--series-${i + 1})`;
+const NCCL_COLOR = seriesColor(7); // "nccl" is family slot 8: same entity color in the family and phase charts
 // Step phases from the NVTX hook (poc/nvtx); "unattributed" stays neutral gray.
 const PHASES = [
   ["decode", "Decode-only steps", seriesColor(0)],
@@ -24,6 +25,8 @@ const PHASES = [
   ["prefill", "Prefill-only steps", seriesColor(2)],
   ["unattributed", "Outside any step", "var(--text-muted)"],
 ];
+// Tensor parallel: NCCL time is taken out of the phases above and stacked as its own segment.
+const PHASES_WITH_NCCL = [...PHASES, ["nccl", "NCCL all-reduce (any step)", NCCL_COLOR]];
 let allProfiles = []; // every node
 let profiles = [];    // the selected node's, used by all charts and tables
 let selectedNode = null;
@@ -283,6 +286,11 @@ function renderKpis() {
     tile("Tokens per second", `${fmtNum(get(p, "derived.prefill_tps"), 0)} / ${fmtNum(get(p, "derived.decode_tps"), 0)}`,
       "prefill / decode (from NVTX step ranges)", "derived.decode_tps");
   }
+  if (get(p, "attribution.by_kernel_family_ms.nccl") > 0) {
+    tile("NCCL share of GPU time", fmtPct(get(p, "derived.nccl_pct")),
+      `decode steps ${fmtPct(get(p, "derived.nccl_in_decode_pct"))} · mixed ${fmtPct(get(p, "derived.nccl_in_mixed_pct"))} · incl. waiting for peers`,
+      "derived.nccl_pct");
+  }
   tile("Dashboard lag", fmtS(get(p, "fleet.lag_s")), "target 5–10 s", "fleet.lag_s");
 }
 
@@ -326,7 +334,8 @@ function render() {
   const p = profiles[profiles.length - 1];
   if (p) {
     const procs = (p.processes || []).length ? ` · processes ${p.processes.join(", ")}` : "";
-    document.getElementById("ident").textContent = `${p.node || "node"} · GPU ${get(p, "gpu.index") ?? 0} ${get(p, "gpu.chip") || ""}${procs}`;
+    const role = p.role ? ` · ${p.role}` : "";
+    document.getElementById("ident").textContent = `${p.node || "node"}${role} · GPU ${get(p, "gpu.index") ?? 0} ${get(p, "gpu.chip") || ""}${procs}`;
     document.getElementById("updated").textContent = `last snapshot ${timeLabel(p)} · ${profiles.length} shown`;
   }
   renderKpis();
@@ -343,9 +352,10 @@ function render() {
     field: "attribution.by_kernel_family_ms",
     series: FAMILIES.map(([k, label], i) => [k, label, seriesColor(i)]),
   });
+  const anyNccl = profiles.some((q) => get(q, "derived.phase_split.nccl") > 0);
   stackedChart(document.getElementById("ch-phase"), document.getElementById("lg-phase"), {
-    field: "attribution.by_phase_ms",
-    series: PHASES,
+    field: "derived.phase_split",
+    series: anyNccl ? PHASES_WITH_NCCL : PHASES,
   });
   lineChart(document.getElementById("ch-delay"), document.getElementById("lg-delay"), {
     fmt: { value: fmtMs, axis: null },
@@ -386,6 +396,18 @@ function derive(p) {
     for (const [k] of PHASES) d[`${k}_pct`] = tot ? (100 * (ph[k] || 0)) / tot : null;
   }
   if (tok) { d.prefill_tps = (tok.prefill || 0) / secs; d.decode_tps = (tok.decode || 0) / secs; }
+  // NCCL (tensor-parallel all-reduce): share of kernel time, share within decode / mixed steps, and the phase
+  // chart's split with NCCL carved out of each phase.
+  const nccl = get(p, "attribution.by_kernel_family_ms.nccl");
+  const ktime = get(p, "attribution.kernel_time_ms");
+  if (nccl != null && ktime) d.nccl_pct = (100 * nccl) / ktime;
+  const pn = get(p, "attribution.by_phase_nccl_ms");
+  if (ph) {
+    d.phase_split = {};
+    for (const [k] of PHASES) d.phase_split[k] = Math.max(0, (ph[k] || 0) - ((pn && pn[k]) || 0));
+    d.phase_split.nccl = pn ? PHASES.reduce((a, [k]) => a + (pn[k] || 0), 0) : 0;
+    if (pn) for (const k of ["decode", "mixed"]) d[`nccl_in_${k}_pct`] = ph[k] ? (100 * (pn[k] || 0)) / ph[k] : null;
+  }
   p.derived = d;
   return p;
 }

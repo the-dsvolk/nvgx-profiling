@@ -21,6 +21,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -90,10 +91,12 @@ namespace nvgx {
     using Key = std::pair<uint64_t, uint64_t>;
 
     // ---------- kernel families (fixed order: drives dashboard colors) ----------
-    enum Family : int { Gemm, FlashAttention, PytorchNative, FlashInferSampling, VllmCustom, Other, Unresolved, FamilyCount };
+    // Nccl: NCCL collective kernels (ncclDevKernel_*, older ncclKernel_*). Their GPU time includes waiting for the
+    // peer ranks, so it is communication plus skew, not just transfer.
+    enum Family : int { Gemm, FlashAttention, PytorchNative, FlashInferSampling, VllmCustom, Other, Unresolved, Nccl, FamilyCount };
     inline const char* FamilyName(int f)
     {
-        static const char* names[] = {"gemm", "flash_attention", "pytorch_native", "flashinfer_sampling", "vllm_custom", "other", "unresolved"};
+        static const char* names[] = {"gemm", "flash_attention", "pytorch_native", "flashinfer_sampling", "vllm_custom", "other", "unresolved", "nccl"};
         return names[f];
     }
     inline int Classify(std::string_view n)
@@ -101,6 +104,8 @@ namespace nvgx {
         auto has = [&](std::string_view s) { return n.find(s) != std::string_view::npos; };
         if (n.empty() || has("??"))
             return Unresolved;
+        if (has("ncclDevKernel") || has("ncclKernel"))
+            return Nccl;
         if (has("flash_fwd"))
             return FlashAttention;
         if (has("cutlass") || n.rfind("nvjet", 0) == 0)
@@ -679,6 +684,7 @@ namespace nvgx {
         {
             uint64_t proc, id, durNs; // id: kernel launch correlation ID, or graph node correlation ID
             bool graph;
+            bool nccl;
         };
         using PhaseCounts = std::array<uint64_t, 3>;
         struct KernelStat
@@ -702,6 +708,7 @@ namespace nvgx {
             std::unordered_set<Key, PairHash> launchesSeen;                    // (proc, graph launch API corr)
             std::unordered_map<Key, PhaseCounts, PairHash> execLaunches;       // (proc, graph exec) -> launches by phase
             uint64_t phaseNs[PhaseCount] = {};
+            uint64_t phaseNcclNs[PhaseCount] = {}; // NCCL part of phaseNs
             uint64_t phaseTokens[2] = {};
             uint64_t phaseSteps[3] = {};
         };
@@ -750,7 +757,7 @@ namespace nvgx {
             if (e <= s)
                 return;
             const uint64_t d = e - s;
-            m_snap.kernelRecs.push_back({proc, launchCorr, d, graph});
+            m_snap.kernelRecs.push_back({proc, launchCorr, d, graph, family == Nccl});
             m_snap.kernels++;
             m_snap.kernelNs += d;
             m_snap.familyNs[family] += d;
@@ -776,20 +783,30 @@ namespace nvgx {
         void ResolvePhases()
         {
             Snapshot& s = m_snap;
-            std::unordered_map<Key, uint64_t, PairHash> execNs;
+            // Per graph exec: {all kernel time, NCCL part}. The NCCL part follows the same phase split.
+            std::unordered_map<Key, std::pair<uint64_t, uint64_t>, PairHash> execNs;
+            auto add = [&s](int phase, uint64_t ns, uint64_t ncclNs) {
+                s.phaseNs[phase] += ns;
+                s.phaseNcclNs[phase] += ncclNs;
+            };
             for (const KernelRec& k : s.kernelRecs)
             {
+                const uint64_t ncclNs = k.nccl ? k.durNs : 0;
                 if (!k.graph)
                 {
                     const int8_t* ph = FindIn(m_kernelPhaseNew, m_kernelPhasePrev, {k.proc, k.id});
-                    s.phaseNs[ph ? int(*ph) : int(PhaseUnattributed)] += k.durNs;
+                    add(ph ? int(*ph) : int(PhaseUnattributed), k.durNs, ncclNs);
                     continue;
                 }
                 auto it = m_nodeExec.find({k.proc, k.id});
                 if (it == m_nodeExec.end())
-                    s.phaseNs[PhaseUnattributed] += k.durNs;
+                    add(PhaseUnattributed, k.durNs, ncclNs);
                 else
-                    execNs[{k.proc, it->second}] += k.durNs;
+                {
+                    auto& e = execNs[{k.proc, it->second}];
+                    e.first += k.durNs;
+                    e.second += ncclNs;
+                }
             }
             for (const auto& [exec, ns] : execNs)
             {
@@ -797,17 +814,20 @@ namespace nvgx {
                 const uint64_t total = c ? (*c)[0] + (*c)[1] + (*c)[2] : 0;
                 if (!total)
                 {
-                    s.phaseNs[PhaseUnattributed] += ns;
+                    add(PhaseUnattributed, ns.first, ns.second);
                     continue;
                 }
-                uint64_t assigned = 0;
+                uint64_t assigned = 0, assignedNccl = 0;
                 for (int p = 0; p < 2; ++p)
                 {
-                    const uint64_t part = static_cast<uint64_t>(static_cast<double>(ns) * (*c)[p] / total);
-                    s.phaseNs[p] += part;
+                    const double share = static_cast<double>((*c)[p]) / total;
+                    const uint64_t part = static_cast<uint64_t>(static_cast<double>(ns.first) * share);
+                    const uint64_t partNccl = static_cast<uint64_t>(static_cast<double>(ns.second) * share);
+                    add(p, part, partNccl);
                     assigned += part;
+                    assignedNccl += partNccl;
                 }
-                s.phaseNs[PhaseMixed] += ns - assigned;
+                add(PhaseMixed, ns.first - assigned, ns.second - assignedNccl);
             }
         }
 
@@ -846,6 +866,9 @@ namespace nvgx {
             j.Begin('{');
             j.Key("schema").Text("nvgx.workload_profile/v0");
             j.Key("node").Text(m_node);
+            // Optional free-text role of this node, e.g. "TP rank 0 of 2" (environment variable NVGX_FLEET_ROLE).
+            if (const char* role = std::getenv("NVGX_FLEET_ROLE"); role && *role)
+                j.Key("role").Text(role);
             j.Key("snapshot_number").Int(s.snapshotNumber);
             j.Key("gpu").Begin('{').Key("index").Int(0).Key("chip").Text(m_chip).Key("device").Text(m_device).End('}');
             j.Key("processes").Begin('[');
@@ -867,6 +890,11 @@ namespace nvgx {
             j.Key("by_phase_ms").Begin('{');
             for (int p = 0; p < PhaseCount; ++p)
                 j.Key(PhaseName(p)).Num(s.phaseNs[p] / 1e6, 1);
+            j.End('}');
+            // NCCL kernel time inside by_phase_ms (tensor-parallel all-reduces per step class).
+            j.Key("by_phase_nccl_ms").Begin('{');
+            for (int p = 0; p < PhaseCount; ++p)
+                j.Key(PhaseName(p)).Num(s.phaseNcclNs[p] / 1e6, 1);
             j.End('}').End('}');
             // Tokens and steps of the step ranges that ended in this window.
             j.Key("phase_tokens").Begin('{').Key("prefill").Int(s.phaseTokens[0]).Key("decode").Int(s.phaseTokens[1]).End('}');

@@ -1,6 +1,8 @@
 # Plan: NCCL profiling across two DGX Sparks (NCCL 2.32.6)
 
-> **Status:** stage 1 (micro-benchmark) **done on 2026-11-22**, results below. Stages 2–3 are next.
+> **Status (2026-11-22):** stage 1 (micro-benchmark) **done**, results below. Stage 2 steps 1–2 **done**: vLLM TP=2
+> across both Sparks on NCCL 2.32.6, NCCL time on the dashboard from the SDK alone, and NCCL Inspector on the
+> traced side ([results](../results/2026-11-22-nccl-tp2/README.md)). Stage 3 is next.
 
 The Nsight Perf SDK for AI shows what one GPU does. Once a model is split across two DGX Sparks with
 tensor parallelism, every decode step also waits on all-reduces over the network, and we want those in
@@ -37,7 +39,7 @@ what NVIDIA's Spark guide uses. **Stage 1 measures that difference on our two Sp
 | Stage | What | Gate |
 |---|---|---|
 | **1. Micro-benchmark** (done) | Two-node all-reduce, 2.31.2 vs 2.32.6, each without and with NCCL's example profiler plugin | Both builds run over RoCE on both Sparks; overhead numbers per message size |
-| **2. vLLM, tensor parallel 2** | Same image on both Sparks, `--tensor-parallel-size 2` with the NCCL picked in stage 1; the load generator from [`poc/workload/`](../poc/workload/README.md) | No hangs over a 30-min `mixed` run; tokens/s and TPOT vs a single Spark |
+| **2. vLLM, tensor parallel 2** (steps 1–2 done) | Same image on both Sparks, `--tensor-parallel-size 2` with the NCCL picked in stage 1; the load generator from [`poc/workload/`](../poc/workload/README.md). Step 1: NCCL kernels as the SDK sees them, on the dashboard. Step 2: NCCL Inspector on the traced side only | No hangs (3 × 10 min, 0 errors ✅); NCCL share per step on the dashboard ✅; Inspector overhead below noise ✅. Not yet: a 30-min run, tokens/s vs a single Spark |
 | **3. NCCL in the fleet profile** | A profiler plugin (or NCCL Inspector) that appends collective events lock-free and hands them to the exporter next to the Nsight Perf SDK data | Per-step all-reduce time on the dashboard; overhead on vLLM tokens/s < 3% |
 
 ## Stage 1: micro-benchmark

@@ -41,7 +41,7 @@
   <section class="grid2">
     <div class="card">
       <h2>GPU time by step phase</h2>
-      <p class="desc">Kernel time per 5 s snapshot, attributed through NVTX ranges on each vLLM engine step. vLLM batches prompt processing with ongoing decodes (chunked prefill), so prefill mostly shows as "mixed".</p>
+      <p class="desc">Kernel time per 5 s snapshot, attributed through NVTX ranges on each vLLM engine step. vLLM batches prompt processing with ongoing decodes (chunked prefill), so prefill mostly shows as "mixed". With tensor parallelism, NCCL all-reduce time is carved out of the steps as its own segment (it includes waiting for the other ranks).</p>
       <div class="legend" id="lg-phase"></div>
       <div class="chart" id="ch-phase"></div>
     </div>
