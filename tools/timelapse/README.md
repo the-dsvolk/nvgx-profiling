@@ -24,10 +24,20 @@ re-rendered with a different crop, speed or window.
      --keyframes 40,120,200 --keyframes-dir showcases/<dir>/img
    ```
 
-**Replay mode** (`?replay=<recording>&frame=<N>[&window=<snapshots>]`) makes the dashboard draw the window
-ending at snapshot N of a recording instead of the live feed, with a caption banner for the active load
-regime and elapsed time. It hides the tables and the lag chart so a frame crops to tiles plus four charts,
-and sets `<html data-ready="1">` when drawn.
+**Replay mode** (`?replay=<recording>&frame=<N>[&window=<snapshots>][&hist=<metric>]`) makes the dashboard draw
+the window ending at snapshot N of a recording instead of the live feed, with a caption banner for the active
+load regime and elapsed time. It hides the tables, the lag chart and the lag tile so a frame crops to tiles,
+four charts and the latency-distribution card, and sets `<html data-ready="1">` when drawn. `hist` picks the
+latency metric (`nccl`, `interval`, `step`, `launch`, `sync`); `render_timelapse.py --query hist=nccl` sets it
+for every frame, and `--keyframes 110:interval,236:launch` per key frame. Use `--size 1440,1410` to include the
+latency card.
+
+4. **Summarize** a run per regime type (load-generator numbers, profile averages, latency p50/p99 from the
+   summed histograms) for the showcase text:
+
+   ```shell
+   python3 tools/timelapse/regime_stats.py --recording poc/fleet/static/recordings/<run>.json --load-log <generator>.jsonl
+   ```
 
 Pacing: 30 minutes of 5 s snapshots ≈ 360 frames; `--step 2 --fps 10` gives an ~18 s loop.
 Requirements: Google Chrome, Python 3 with Pillow built with WebP support.

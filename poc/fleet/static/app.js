@@ -332,7 +332,7 @@ function renderHist() {
     const f = frame(histEl, 252, { l: 40, r: 10, t: 34, b: 30 });
     const { svg, m: mg, pw, ph } = f;
     const shares = aggTot.slice(lo, hi + 1).map((c) => (events ? (100 * c) / events : 0));
-    const top = niceMax(Math.max(...shares, 1) * 1.1);
+    const top = Math.min(100, niceMax(Math.max(...shares, 1) * 1.1)); // shares: never above 100%
     for (const v of ticks(top)) {
       const y = mg.t + ph - (v / top) * ph;
       s("line", { x1: mg.l, x2: mg.l + pw, y1: y, y2: y, "stroke-width": 1 }, svg, { stroke: v === 0 ? "var(--axis)" : "var(--grid)" });
@@ -483,7 +483,9 @@ function renderKpis() {
       `decode steps ${fmtPct(get(p, "derived.nccl_in_decode_pct"))} · mixed ${fmtPct(get(p, "derived.nccl_in_mixed_pct"))} · incl. waiting for peers`,
       "derived.nccl_pct");
   }
-  tile("Dashboard lag", fmtS(get(p, "fleet.lag_s")), "target 5–10 s", "fleet.lag_s");
+  // Replay frames (time-lapse) hide lag, like the lag chart: it describes the live pipeline, not the workload.
+  if (!document.documentElement.classList.contains("frame"))
+    tile("Dashboard lag", fmtS(get(p, "fleet.lag_s")), "target 5–10 s", "fleet.lag_s");
 }
 
 function table(container, head, rows) {
@@ -634,11 +636,14 @@ function add(p) {
 }
 
 // ---------- replay / frame mode (for rendering time-lapse frames) ----------
-// ?replay=<recording.json>&frame=<N>[&window=<snapshots>] draws the window ending at snapshot N of a recording
-// (tools/timelapse/export_recording.py) instead of the live feed, with a caption of the active load regime.
+// ?replay=<recording.json>&frame=<N>[&window=<snapshots>][&hist=<metric>] draws the window ending at snapshot N of
+// a recording (tools/timelapse/export_recording.py) instead of the live feed, with a caption of the active load
+// regime; hist picks the latency-distribution metric (nccl, interval, step, launch, sync).
 // Sets <html data-ready="1"> when drawn, for headless screenshots.
 async function startReplay(params) {
   document.documentElement.classList.add("frame");
+  const hm = params.get("hist");
+  if (HIST_METRICS.some((m) => m.key === hm)) histMetric = hm;
   const rec = await (await fetch(params.get("replay"))).json();
   const n = Math.max(0, Math.min(rec.profiles.length - 1, parseInt(params.get("frame") || "0", 10)));
   const win = parseInt(params.get("window") || "120", 10);

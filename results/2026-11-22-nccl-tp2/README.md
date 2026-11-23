@@ -127,8 +127,9 @@ duplicate step starts were filtered out.*
   baseline 2 produced 100 profiles in 650 s instead of ~130: snapshots took longer than their 5 s window.
   The traced rank launched 31,000–78,000 kernels per second in this run, ~5,000 of them all-reduces.
   The DuckDB copy is the known slow path ([POC README](../../poc/README.md)); running
-  FleetSink without it is the next thing to try. Supporting that: after restarting the exporter with a fresh
-  output folder (an empty DuckDB), lag under the same load was back to 3–5 s.
+  FleetSink without it is the next thing to try. A fresh output folder (an empty DuckDB) brought lag back to
+  3–5 s for the first minutes, but over the 30-minute [showcase run](../../showcases/2026-11-22-tp2-two-sparks/README.md#timing-and-data-quality)
+  it reached p95 11.4 s again, with 146 of ~314 snapshots overrunning their 5 s window.
 - **The verdict doesn't know about communication.** With a quarter of kernel time in NCCL it says
   "mixed" or "host-bound". A "communication-bound" verdict (NCCL share above a threshold) is an easy addition.
 - **One-sided view.** As planned, only the head is traced; which rank was late stays unknown.
